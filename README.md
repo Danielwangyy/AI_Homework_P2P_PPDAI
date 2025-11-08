@@ -74,18 +74,27 @@
 
 ## 4. 安装项目依赖（Agent 版脚本）
 
-按照下列顺序逐条说，等待 Agent 完成后再说下一句：
+**推荐第一句话：**
+```
+请执行 ./scripts/setup.sh
+```
+
+- 这个脚本会在项目根目录自动运行 `python -m pip install -e .`，并顺带执行 `python -m ai_homework.cli.run_pipeline --help`，只要能看到参数说明，就代表环境就绪。
+- 如果脚本提示“未检测到激活的虚拟环境”，按照提示先创建并激活 `.venv`，再运行一次脚本即可。
+- Windows 用户可在 Git Bash、WSL 或任何能执行 `.sh` 的终端里运行；如果终端提示找不到 `pip`，脚本会一起把报错输出展示出来，方便排查。
+
+> 想了解脚本里做了什么？打开 `scripts/setup.sh` 看注释即可。
+
+### 备用方案：一步步手动执行（用于排障或进阶学习）
 
 1. `请使用 python3 在当前目录创建名为 .venv 的虚拟环境`
 2. `请激活当前目录下的 .venv 虚拟环境`
 3. `请升级 pip`
 4. `请安装 environments/requirements.txt 里的依赖`
+5. `请执行 python -m pip install -e .`
+6. `请执行 python -m ai_homework.cli.run_pipeline --help`
 
-安装完毕后，确认 Python 能找到项目包：
-```
-请执行 python -m ai_homework.cli.run_pipeline --help
-```
-看到参数介绍说明环境无误。
+手动执行时，只要最后一步能看到参数介绍，同样表示环境无误。
 
 ---
 
@@ -109,12 +118,16 @@
 
 | 目标 | 直接对 Agent 说 |
 | --- | --- |
-| 跑完整流程（数据准备 + 模型训练） | `请执行 python -m ai_homework.cli.run_pipeline` |
+| 初始化环境（推荐） | `请执行 ./scripts/setup.sh` |
+| 跑完整流程（推荐脚本） | `请执行 ./scripts/run_pipeline.sh` |
+| 跑完整流程（直接使用 python） | `请执行 python -m ai_homework.cli.run_pipeline` |
 | 只准备数据 | `请执行 python -m ai_homework.cli.run_pipeline --skip-train` |
 | 只训练模型 | `请执行 python -m ai_homework.cli.run_pipeline --skip-data` |
 | 查看数据准备日志 | `请把 outputs/logs/data_preparation.log 展示给我` |
 | 查看模型训练日志 | `请把 outputs/logs/model_training.log 展示给我` |
 | 运行测试 | `请执行 python -m pytest` |
+
+> `./scripts/run_pipeline.sh` 会先尝试导入 `ai_homework`，若失败会提醒你先运行 `./scripts/setup.sh`。需要传参时直接写在脚本后面即可，例如 `./scripts/run_pipeline.sh --skip-data`。
 
 运行成功后，生成的模型、图表、表格会出现在 `outputs/` 目录下。
 
