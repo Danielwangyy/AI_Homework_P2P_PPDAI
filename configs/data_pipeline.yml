@@ -1,0 +1,10 @@
++# 数据准备流程配置
++raw_dir: data/raw/source_data
++interim_dir: data/interim
++output_dir: data/processed
++train_ratio: 0.7
++valid_ratio: 0.15
++test_ratio: 0.15
++sample: 1.0
++random_state: 42
+

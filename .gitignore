@@ -1,0 +1,41 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# macOS metadata
+.DS_Store
+
+# Virtual environments
+.venv/
+env/
+environments/p2p_env/
+src/ai_homework_p2p.egg-info/
+
+# Project outputs (generated artifacts)
+outputs/
+artifacts/
+catboost_info/
+checkpoints/
+logs/
+models/
+reports/figures/
+reports/tables/
+
+# Data artifacts
+data/external/
+data/interim/
+data/processed/
+data/raw/source_data/
+
+# Model files
+*.joblib
+*.pkl
+*.parquet
+
+# Experiment tracking
+mlruns/
+*.tfevents
+

@@ -1,0 +1,86 @@
+data:
+  train_path: "data/processed/train.parquet"
+  valid_path: "data/processed/valid.parquet"
+  test_path: "data/processed/test.parquet"
+  id_column: "ListingId"
+  label_column: "label"
+
+output:
+  models_dir: "outputs/models"
+  artifacts_dir: "outputs/artifacts"
+  figures_dir: "outputs/reports/figures"
+  tables_dir: "outputs/reports/tables"
+  logs_dir: "outputs/logs"
+
+metrics:
+  - accuracy
+  - precision
+  - recall
+  - f1
+  - roc_auc
+cross_validation:
+  folds: 5
+  scoring: "f1"
+threshold_tuning:
+  strategy: "cost"
+  fp_cost: 1.0
+  fn_cost: 5.0
+  grid_size: 201
+evaluation:
+  shap:
+    enabled: true
+    sample_size: 2000
+
+models:
+  logistic_regression:
+    type: "logistic_regression"
+    params:
+      class_weight: "balanced"
+      max_iter: 500
+      solver: "lbfgs"
+    param_grid:
+      C: [0.1, 1.0, 10.0, 20.0]
+  lightgbm:
+    type: "lightgbm"
+    params:
+      objective: "binary"
+      n_estimators: 400
+      learning_rate: 0.05
+      subsample: 0.8
+      colsample_bytree: 0.8
+      random_state: 42
+      class_weight: "balanced"
+    param_grid:
+      num_leaves: [31, 63]
+      max_depth: [-1, 8]
+      min_child_samples: [20, 40]
+  xgboost:
+    type: "xgboost"
+    params:
+      objective: "binary:logistic"
+      eval_metric: "logloss"
+      subsample: 0.8
+      colsample_bytree: 0.8
+      n_estimators: 300
+      n_jobs: 4
+      random_state: 42
+    param_grid:
+      max_depth: [3, 5]
+      learning_rate: [0.03, 0.1]
+      min_child_weight: [1, 5]
+      gamma: [0.0, 0.1]
+      subsample: [0.6, 0.8]
+  catboost:
+    type: "catboost"
+    params:
+      iterations: 400
+      learning_rate: 0.05
+      depth: 6
+      loss_function: "Logloss"
+      random_state: 42
+      verbose: 0
+      class_weights: [1.0, 4.0]
+    param_grid:
+      depth: [5, 7]
+      l2_leaf_reg: [3, 7]
+
