@@ -80,6 +80,7 @@
 ```
 
 - 这个脚本会在项目根目录自动运行 `python -m pip install -e .`，并顺带执行 `python -m ai_homework.cli.run_pipeline --help`，只要能看到参数说明，就代表环境就绪。
+- 如果当前目录没有 `.venv`，脚本会自动创建一个虚拟环境、在内部安装依赖并完成验证；执行完成后，可手动运行 `source .venv/bin/activate` 保持后续会话使用该环境。
 - 如果脚本提示“未检测到激活的虚拟环境”，按照提示先创建并激活 `.venv`，再运行一次脚本即可。
 - Windows 用户可在 Git Bash、WSL 或任何能执行 `.sh` 的终端里运行；如果终端提示找不到 `pip`，脚本会一起把报错输出展示出来，方便排查。
 
