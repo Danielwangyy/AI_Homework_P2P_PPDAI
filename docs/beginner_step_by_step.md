@@ -76,6 +76,7 @@
 
 ### 5. 我需要关注哪些文件？
 
+- **阅读导航**：`docs/reading_guide.md`（先了解整体文档顺序与适合的读者）
 - **操作手册**：`README.md`（如何一步步运行项目）
 - **需求背景**：`docs/requirements_analysis.md`（项目要达成的业务目标）
 - **流程总结**：`docs/project_summary.md`（已经完成了哪些任务、结果如何）
