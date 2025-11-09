@@ -169,6 +169,8 @@
 
 - **想了解项目结构与角色说明**  
   让 Agent 打开并朗读 `docs/project_structure.md`、`docs/project_summary.md`。
+- **想对照函数级实现细节**  
+  参考 `docs/beginner_function_walkthrough.md`，了解每个步骤背后调用了哪些脚本与函数。
 
 - **没时间每次开口？**  
   可以把常用命令复制成备忘录，直接粘贴给 Agent。
