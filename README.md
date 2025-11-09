@@ -6,23 +6,24 @@
 
 ## 0. 你将完成什么？
 
-1. 下载项目代码并放到自己的电脑上  
-2. 安装运行所需的 Python 环境  
-3. 放好老师提供的原始数据  
-4. 运行数据准备和模型训练流程，生成结果  
+1. 下载项目代码并放到自己的电脑上
+2. 安装运行所需的 Python 环境
+3. 放好老师提供的原始数据
+4. 运行数据准备和模型训练流程，生成结果
 5. （选做）把自己的改动提交到 GitHub 或压缩后上交
+6. 按照要求完成作业内容打包压缩，提交到系统
 
 ---
 
 ## 1. 准备工作
 
-| 名称 | 必需 | 说明 |
-| --- | --- | --- |
-| 电脑 (macOS / Windows / Linux) | ✅ | 需保证有至少 20GB 空间 |
-| Cursor 编辑器 | ✅ | 从 <https://cursor.sh/> 下载并安装 |
-| Git | ✅ | macOS 通常已内置；Windows 可从 <https://git-scm.com/download/win> 安装 |
-| 老师提供的数据包 `P2P_PPDAI_DATA` | ✅ | 内含 `LC.csv`、`LP.csv`、`LCIS.csv` 等 |
-| GitHub 账号 | 可选 | 没账号也可以学习；若要提交 PR，建议注册 |
+| 名称                                | 必需 | 说明                                                                                                 |
+| ----------------------------------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| 电脑 (macOS / Windows / Linux)      | ✅   | 需保证有至少 20GB 空间                                                                               |
+| Cursor 编辑器                       | ✅   | 从[https://cursor.sh/](https://cursor.sh/) 下载并安装                                                   |
+| Git                                 | ✅   | macOS 通常已内置；Windows 可从[https://git-scm.com/download/win](https://git-scm.com/download/win) 安装 |
+| 老师提供的数据包 `P2P_PPDAI_DATA` | ✅   | 内含 `LC.csv`、`LP.csv`、`LCIS.csv` 等                                                         |
+| GitHub 账号                         | 可选 | 没账号也可以学习；若要提交 PR，建议注册                                                              |
 
 > 不会安装 Git？打开 Cursor 的 Agent 聊天，直接说：`请帮我安装 git`，按提示完成即可。
 
@@ -34,9 +35,11 @@
 
 1. 打开 Cursor，确认聊天窗口上方显示 `Agent`。若是 `Ask`，点一下切换。
 2. 依次对 Agent 说：
+
    ```
    请把仓库克隆到 ~/Documents，仓库地址是 https://github.com/Danielwangyy/AI_Homework_P2P_PPDAI.git
    ```
+
    ```
    请进入 ~/Documents/AI_Homework_P2P_PPDAI，并告诉我当前路径
    ```
@@ -50,9 +53,11 @@
 2. 在浏览器访问原始仓库 → 点击 `Fork` → `Create fork`。
 3. 复制自己仓库的地址（例如 `https://github.com/你的用户名/AI_Homework_P2P_PPDAI.git`）。
 4. 依次对 Agent 说：
+
    ```
    请把仓库克隆到 ~/Documents，仓库地址是 <粘贴你的仓库地址>
    ```
+
    ```
    请进入 ~/Documents/AI_Homework_P2P_PPDAI
    ```
@@ -62,10 +67,13 @@
 ## 3. 先让 Cursor Agent 熟悉环境
 
 每次执行命令前确保 Agent 真的在项目根目录。可以随时说：
+
 ```
 请告诉我当前路径
 ```
+
 若路径不是 `~/Documents/AI_Homework_P2P_PPDAI`（或你指定的目录），说：
+
 ```
 请进入 ~/Documents/AI_Homework_P2P_PPDAI
 ```
@@ -75,6 +83,7 @@
 ## 4. 安装项目依赖（Agent 版脚本）
 
 **推荐第一句话：**
+
 ```
 请执行 ./scripts/setup.sh
 ```
@@ -117,16 +126,16 @@
 
 ## 6. 运行项目（最常用的几句话）
 
-| 目标 | 直接对 Agent 说 |
-| --- | --- |
-| 初始化环境（推荐） | `请执行 ./scripts/setup.sh` |
-| 跑完整流程（推荐脚本） | `请执行 ./scripts/run_pipeline.sh` |
-| 跑完整流程（直接使用 python） | `请执行 python -m ai_homework.cli.run_pipeline` |
-| 只准备数据 | `请执行 python -m ai_homework.cli.run_pipeline --skip-train` |
-| 只训练模型 | `请执行 python -m ai_homework.cli.run_pipeline --skip-data` |
-| 查看数据准备日志 | `请把 outputs/logs/data_preparation.log 展示给我` |
-| 查看模型训练日志 | `请把 outputs/logs/model_training.log 展示给我` |
-| 运行测试 | `请执行 python -m pytest` |
+| 目标                          | 直接对 Agent 说                                                |
+| ----------------------------- | -------------------------------------------------------------- |
+| 初始化环境（推荐）            | `请执行 ./scripts/setup.sh`                                  |
+| 跑完整流程（推荐脚本）        | `请执行 ./scripts/run_pipeline.sh`                           |
+| 跑完整流程（直接使用 python） | `请执行 python -m ai_homework.cli.run_pipeline`              |
+| 只准备数据                    | `请执行 python -m ai_homework.cli.run_pipeline --skip-train` |
+| 只训练模型                    | `请执行 python -m ai_homework.cli.run_pipeline --skip-data`  |
+| 查看数据准备日志              | `请把 outputs/logs/data_preparation.log 展示给我`            |
+| 查看模型训练日志              | `请把 outputs/logs/model_training.log 展示给我`              |
+| 运行测试                      | `请执行 python -m pytest`                                    |
 
 > `./scripts/run_pipeline.sh` 会先尝试导入 `ai_homework`，若失败会提醒你先运行 `./scripts/setup.sh`。需要传参时直接写在脚本后面即可，例如 `./scripts/run_pipeline.sh --skip-data`。
 
@@ -144,54 +153,40 @@
    - （可选）`logs_and_metrics/`：指标表、混淆矩阵、ROC 曲线、关键日志。
 3. 在临时目录中执行 `zip -r 组号-组员1-组员2-组员3.zip .` 生成最终压缩包；命名需符合课程要求。
 4. 每位组员都要在课程系统上传同一压缩包；如需提交多个版本或补充说明，请在小组报告中写清楚原因与文件位置。
-5. 若授课老师要求提供运行环境说明，请附上 Python 版本、主要依赖（可引用 `environments/requirements.txt`）以及常用运行命令。
-
-> 想把作业同步到 GitHub？先按以上方式打包，再依照 `docs/collaboration_guide.md` 的流程在自己的仓库提交即可。
 
 ---
 
 ## 8. 常见疑问速查
 
-- **Agent 提示没有 git/python？**  
-  直接让 Agent 安装，或按提示在终端运行对应安装命令。
-
-- **Agent 说权限不足 / 无法进入目录？**  
-  先让它执行 `pwd` 确认路径，再 `ls` 看看当前有哪些文件；必要时重新进入项目根目录。
-
-- **运行时报错**  
-  把报错复制进聊天，问：“请解释这段报错并告诉我怎么修复。”
-
-- **想了解项目结构与角色说明**  
-  让 Agent 打开并朗读 `docs/project_structure.md`、`docs/project_summary.md`。
-- **想搞清楚文档阅读顺序**  
-  查看 `docs/reading_guide.md`，按推荐路径循序渐进地阅读。
-- **想对照函数级实现细节**  
-  参考 `docs/beginner_function_walkthrough.md`，了解每个步骤背后调用了哪些脚本与函数。
-
-- **没时间每次开口？**  
+- **Agent 提示没有 git/python？**直接让 Agent 安装，或按提示在终端运行对应安装命令。
+- **Agent 说权限不足 / 无法进入目录？**先让它执行 `pwd` 确认路径，再 `ls` 看看当前有哪些文件；必要时重新进入项目根目录。
+- **运行时报错**把报错复制进聊天，问：“请解释这段报错并告诉我怎么修复。”
+- **想了解项目结构与角色说明**让 Agent 打开并朗读 `docs/project_structure.md`、`docs/project_summary.md`。
+- **想搞清楚文档阅读顺序**查看 `docs/reading_guide.md`，按推荐路径循序渐进地阅读。
+- **想对照函数级实现细节**参考 `docs/beginner_function_walkthrough.md`，了解每个步骤背后调用了哪些脚本与函数。
+- **没时间每次开口？**
   可以把常用命令复制成备忘录，直接粘贴给 Agent。
 
 ---
 
 ## 9. 目录速览（查阅更多内容）
 
-- `src/ai_homework/`：核心代码（数据处理、模型训练、评估工具等）  
-- `configs/`：YAML 配置文件，可修改参数  
-- `data/`：原始数据、临时数据、最终数据（已默认忽略原始数据内容）  
-- `outputs/`：程序一键生成的模型、报告与日志  
-- `docs/`：文档与操作指南（重点推荐 `collaboration_guide.md`）  
-- `tests/`：单元测试/集成测试样例  
+- `src/ai_homework/`：核心代码（数据处理、模型训练、评估工具等）
+- `configs/`：YAML 配置文件，可修改参数
+- `data/`：原始数据、临时数据、最终数据（已默认忽略原始数据内容）
+- `outputs/`：程序一键生成的模型、报告与日志
+- `docs/`：文档与操作指南（重点推荐 `collaboration_guide.md`）
+- `tests/`：单元测试/集成测试样例
 
 ---
 
 ## 10. 遇到困难怎么办？
 
-1. 先让 Agent 描述错误原因与修复建议。  
-2. 查看 `outputs/logs/` 里的日志文件，了解运行阶段。  
-3. 查阅 `docs/` 中的说明文档。  
+1. 先让 Agent 描述错误原因与修复建议。
+2. 查看 `outputs/logs/` 里的日志文件，了解运行阶段。
+3. 查阅 `docs/` 中的说明文档。
 4. 仍未解决？请在课程讨论区或 GitHub Issue 中贴出报错与日志。
 
 ---
 
 祝学习顺利！放心把重复的命令交给 Cursor Agent，自己专注理解数据与模型即可。 若对流程有改进建议，欢迎在 `docs/` 中补充，或发起 Issue/PR 与同学交流。***
-
