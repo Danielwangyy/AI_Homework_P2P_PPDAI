@@ -33,3 +33,6 @@ data/raw/source_data/
 mlruns/
 *.tfevents
 
+# Submission staging (local archive for homework packages)
+submission_archive/
+

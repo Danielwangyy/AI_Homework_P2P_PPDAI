@@ -134,25 +134,19 @@
 
 ---
 
-## 7. 提交作业的方式
+## 7. 提交作业的方式（务必在仓库外打包）
 
-### 方案 A：压缩提交（无 GitHub 账号）
+1. 跑完数据准备与模型训练后，把需要上交的内容复制到 **仓库之外** 的临时目录（例如 `~/Desktop/submission_package/`），避免在 Git 工作区堆积大文件或个人信息。
+2. 建议目录结构：
+   - `cleaned_data/`：`loan_master.parquet`、`train.parquet`、`valid.parquet`、`test.parquet` 等清洗成果；
+   - `code/`：核心源码与配置（`configs/`、`src/`、`scripts/`、`tests/`、`environments/requirements.txt`、`pyproject.toml`、`README.md` 等）；
+   - `report/`：小组报告、角色说明材料（可为 PDF/Word 文档）；
+   - （可选）`logs_and_metrics/`：指标表、混淆矩阵、ROC 曲线、关键日志。
+3. 在临时目录中执行 `zip -r 组号-组员1-组员2-组员3.zip .` 生成最终压缩包；命名需符合课程要求。
+4. 每位组员都要在课程系统上传同一压缩包；如需提交多个版本或补充说明，请在小组报告中写清楚原因与文件位置。
+5. 若授课老师要求提供运行环境说明，请附上 Python 版本、主要依赖（可引用 `environments/requirements.txt`）以及常用运行命令。
 
-1. 运行完所有流程后，在文件管理器中右键项目根目录 → “压缩/打包”。  
-2. 把压缩包发送给老师即可（记得数据体积太大时，可只保留 `outputs/`、`docs/`、`configs/`、`src/` 等关键内容）。
-
-### 方案 B：提交到自己的 GitHub 仓库
-
-按照下列顺序依次对 Agent 说：
-```
-请告诉我当前的改动            # 查看状态
-请把所有改动加入暂存区
-请用说明 "完成数据与模型运行" 创建一次提交
-请把当前分支推送到我的 GitHub 仓库
-```
-然后在 GitHub 网页点击 “Compare & pull request”，填写说明并提交 PR。
-
-更完整的协作流程请看 `docs/collaboration_guide.md`。
+> 想把作业同步到 GitHub？先按以上方式打包，再依照 `docs/collaboration_guide.md` 的流程在自己的仓库提交即可。
 
 ---
 
