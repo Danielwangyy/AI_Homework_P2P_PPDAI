@@ -18,11 +18,15 @@ src/ai_homework_p2p.egg-info/
 outputs/
 catboost_info/
 
+# Reports
+reports/summary.md
+
 # Data artifacts
 data/external/
 data/interim/
 data/processed/
 data/raw/source_data/
+data/raw/cleaned_source/
 
 # Model files
 *.joblib
