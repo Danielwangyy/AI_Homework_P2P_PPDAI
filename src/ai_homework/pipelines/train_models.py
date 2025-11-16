@@ -330,8 +330,9 @@ def _export_shap_values(
     figures_dir: Path,
     tables_dir: Path,
     shap_cfg: Dict[str, float],
+    run_identifier: str,
     logger,
-) -> None:
+) -> dict[str, str] | None:
     """根据 SHAP 值解释模型。
 
     只要 `shap` 库已安装、且模型支持树模型解释，就会输出：
@@ -371,25 +372,33 @@ def _export_shap_values(
         model_display_name = _get_model_display_name(model_name)
         ax = plt.gca()
         ax.set_title(f"{model_display_name} SHAP 特征影响力", fontweight="bold")
-        fig_path = figures_dir / f"shap_summary_{model_name}.png"
+        fig_filename = f"shap_summary_{model_name}_{run_identifier}.png"
+        fig_path = figures_dir / fig_filename
         plt.tight_layout()
         plt.savefig(fig_path, dpi=300)
         plt.close()
 
         shap_table = pd.DataFrame(shap_values, columns=display_columns)
         shap_table.insert(0, "model", model_name)
+        table_filename = f"shap_values_{model_name}_{run_identifier}.csv"
+        table_path = tables_dir / table_filename
         shap_table.to_csv(
-            tables_dir / f"shap_values_{model_name}.csv",
+            table_path,
             index=False,
             encoding="utf-8-sig",
         )
-        logger.info("SHAP 结果已输出：%s, %s", fig_path, tables_dir / f"shap_values_{model_name}.csv")
+        logger.info("SHAP 结果已输出：%s, %s", fig_path, table_path)
+        return {
+            "figure": str(fig_path),
+            "table": str(table_path),
+        }
     except (ValueError, AttributeError, TypeError) as e:
         logger.warning("模型 %s 的 SHAP 分析失败（可能是版本兼容性问题）：%s", model_name, str(e))
         logger.warning("跳过 SHAP 分析，继续处理其他模型")
     except Exception as e:
         logger.warning("模型 %s 的 SHAP 分析失败：%s", model_name, str(e))
         logger.warning("跳过 SHAP 分析，继续处理其他模型")
+    return None
 
 
 def run_pipeline(config_path: Path) -> None:
@@ -561,21 +570,40 @@ def run_pipeline(config_path: Path) -> None:
                 encoding="utf-8-sig",
             )
 
+        cm_path: Path | None = None
         if has_test:
             cm_filename = f"confusion_matrix_{model_name}_{run_identifier}.png"
+            cm_path = figures_dir / cm_filename
             plot_confusion_matrix(
                 y_test,
                 test_preds,
-                figures_dir / cm_filename,
+                cm_path,
                 title=f"{model_name} - Confusion Matrix",
             )
 
+        roc_path: Path | None = None
         if has_test and not np.isnan(test_metrics.get("roc_auc", np.nan)):
+            roc_filename = f"roc_curve_{model_name}_{run_identifier}.png"
+            roc_path = figures_dir / roc_filename
             plot_roc_curve(
                 y_test,
                 test_proba,
-                figures_dir / f"roc_curve_{model_name}.png",
+                roc_path,
                 title=f"{model_name} - ROC Curve",
+            )
+
+        shap_assets: dict[str, str] | None = None
+        if shap_cfg.get("enabled", False) and model_name in {"xgboost", "lightgbm", "catboost"}:
+            reference_df = pd.concat([X_train, X_valid], axis=0, ignore_index=True)
+            shap_assets = _export_shap_values(
+                estimator,
+                reference_df,
+                model_name,
+                figures_dir,
+                tables_dir,
+                shap_cfg,
+                run_identifier,
+                logger,
             )
 
         # 保存测试集预测结果（用于后续分析）
@@ -603,6 +631,12 @@ def run_pipeline(config_path: Path) -> None:
             "timestamp": timestamp,
             "run_identifier": run_identifier,
             "run_label": run_label,
+            "artifacts": {
+                "confusion_matrix": str(cm_path) if cm_path else None,
+                "roc_curve": str(roc_path) if roc_path else None,
+                "shap_summary": shap_assets.get("figure") if shap_assets else None,
+                "shap_values": shap_assets.get("table") if shap_assets else None,
+            },
             "config": model_cfg,
         }
         with (artifacts_dir / f"summary_{model_name}.json").open("w", encoding="utf-8") as f:
@@ -621,18 +655,6 @@ def run_pipeline(config_path: Path) -> None:
                 logger.info("特征重要性已输出：%s", fi_path)
         except Exception as e:
             logger.warning("导出特征重要性失败：%s", e)
-
-        if shap_cfg.get("enabled", False) and model_name in {"xgboost", "lightgbm", "catboost"}:
-            reference_df = pd.concat([X_train, X_valid], axis=0, ignore_index=True)
-            _export_shap_values(
-                estimator,
-                reference_df,
-                model_name,
-                figures_dir,
-                tables_dir,
-                shap_cfg,
-                logger,
-            )
 
         threshold_summaries.append(
             {

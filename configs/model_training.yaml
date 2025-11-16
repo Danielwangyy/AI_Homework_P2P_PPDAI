@@ -24,7 +24,7 @@ cross_validation:
 threshold_tuning:
   strategy: "cost"
   fp_cost: 1.0
-  fn_cost: 5.0
+  fn_cost: 2.0
   grid_size: 201
 evaluation:
   shap:
