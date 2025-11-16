@@ -11,6 +11,7 @@
 - 每份数据包含 `ListingId`、特征列与 `label`。
 - 特征经过前序流水线的一致预处理（缺失填补、One-Hot、标准化），此阶段直接使用。
 - 若后续新增特征或重新执行清洗流程，仅需保持列名对齐，即可复用训练脚本。
+- 可通过 `configs/data_processing.yaml` 中的 `feature_drops` 段落按“exact/prefix”等规则移除特征，实现快速的消融实验（当前示例：去除 `loan_date_year_*` 相关维度）。
 
 ### 3. 模型方案
 1. **逻辑回归（Baseline）**
@@ -57,4 +58,14 @@
 - 引入更多模型（如随机森林、深度学习）并统一评估接口。
 - 探索多目标优化（Precision-Recall 曲线、收益函数）或分层阈值策略。
 - 结合 SHAP、Permutation Importance、LIME 等方法加强可解释与稳定性分析。
+
+### 9. 特征消融实验流程
+- **设计目标**：逐步移除（或替换）某类特征，评估其对模型训练时间、验证指标、阈值与特征重要性的影响，从而判断该特征族的业务价值与上线必要性。
+- **配置方式**：在 `configs/data_processing.yaml` 的 `feature_drops` 段落中分别声明 `before_encoding`（原始列）与 `after_encoding`（One-Hot 等衍生列）的移除规则，支持 `exact`、`prefixes`、`suffixes`、`contains`、`regex` 等形式，并在日志中自动记录被移除的字段列表。
+- **执行步骤**：
+  1. 基线运行：保留全部特征执行一次流水线，记录模型指标、阈值、SHAP 等基准结果；
+  2. 修改配置：按实验计划更新 `feature_drops`，或结合白名单直接取消特定特征；
+  3. 重跑流水线：使用统一命令 `python3 -m ai_homework.cli.run_pipeline`，系统会重新生成数据与模型；
+  4. 归档结果：将最新的 `model_metrics.csv`、`threshold_summary.csv`、特征/SHAP 报告与关键日志片段整理入文档或实验表格，便于对比。
+- **记录与版本管理**：推荐在 `docs/modeling_results.md` 中增设“消融实验记录”小节，包含实验名称、移除特征描述、主要指标差异、结论/后续动作；同时可在 Git 分支或笔记中注明配置编号与运行时间，保证可追溯性。
 

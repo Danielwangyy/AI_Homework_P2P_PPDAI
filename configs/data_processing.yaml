@@ -7,62 +7,78 @@ scaler_output_path: "outputs/artifacts/numeric_scaler.pkl"
 label_column: "label"
 id_column: "ListingId"
 categorical_features:
-  - "初始评级"
-  - "借款类型"
-  - "性别"
-  - "借款成功日期_month"
-  - "借款成功日期_weekday"
+  - "loan_type"
+  - "rating"
+  - "user_gender"
+  - "loan_date_year"
+  - "loan_date_quarter"
+  - "loan_date_month"
+  - "loan_date_weekday"
 binary_features:
-  - "是否首标"
-  - "手机认证"
-  - "户口认证"
-  - "视频认证"
-  - "学历认证"
-  - "征信认证"
-  - "淘宝认证"
+  - "first_loan_flag"
+  - "phone_verified"
+  - "hukou_verified"
+  - "video_verified"
+  - "education_verified"
+  - "credit_verified"
+  - "taobao_verified"
 numeric_features:
-  - "借款金额"
-  - "借款期限"
-  - "借款利率"
-  - "年龄"
-  - "历史成功借款次数"
-  - "历史成功借款金额"
-  - "总待还本金"
-  - "历史正常还款期数"
-  - "历史逾期还款期数"
-  - "历史还款能力指数"
-  - "借款杠杆比"
-  - "待还本金占比"
-  - "历史逾期率"
-  - "借款金额每期"
-  - "历史平均借款金额"
-  - "借款金额相对历史平均"
-  - "历史平均每期还款额"
-  - "历史还款净差"
-  - "lp总期数"
-  - "lp计划总本金"
-  - "lp计划总利息"
-  - "lp平均期本金"
-  - "lp平均期利息"
-  - "lp平均期本息"
-  - "lp计划周期天数"
-lp_numeric_features:
-  - "lp总期数"
-  - "lp计划总本金"
-  - "lp计划总利息"
-  - "lp平均期本金"
-  - "lp平均期利息"
-  - "lp平均期本息"
-  - "lp计划周期天数"
-feature_version: "v1.1"
+  - "loan_amount"
+  - "loan_term"
+  - "interest_rate"
+  - "user_age"
+  - "history_total_loans"
+  - "history_total_amount"
+  - "outstanding_principal"
+  - "history_normal_terms"
+  - "history_overdue_terms"
+  - "loan_amount_per_term"
+  - "history_repay_ratio"
+  - "history_overdue_rate"
+  - "history_avg_loan_amount"
+  - "loan_amount_ratio_to_history_avg"
+  - "history_avg_term_payment"
+  - "loan_amount_to_history_amount_ratio"
+  - "outstanding_to_history_amount_ratio"
+  - "rating_numeric"
+  - "loan_amount_rating_interaction"
+  - "loan_term_rating_interaction"
+  - "loan_amount_history_repay_ratio"
+  - "loan_term_history_overdue_rate"
+lp_numeric_features: []
+feature_version: "v2.0"
 feature_analysis:
   summary_path: "outputs/reports/tables/feature_analysis_summary.csv"
   high_corr_path: "outputs/reports/tables/feature_high_correlation.csv"
   high_corr_threshold: 0.85
+feature_selection:
+  enable: true
+  strategy: "vote"
+  min_methods: 1
+  report_path: "outputs/reports/tables/feature_selection_summary.csv"
+  correlation:
+    enable: true
+    threshold: 0.01
+    max_features: 120
+  chi2:
+    enable: true
+    top_k: 120
+  model_importance:
+    enable: true
+    top_k: 80
+    n_estimators: 200
+    random_state: 42
+feature_drops:
+  before_encoding:
+    exact:
+      - "loan_date_year"
+  after_encoding:
+    prefixes:
+      - "loan_date_year_"
 test_size: 0.15
 val_size: 0.15
 random_state: 42
-split_strategy: "time"
+split_strategy: "random"
 train_end_date: "2016-12-31"
 val_end_date: "2017-06-30"
 

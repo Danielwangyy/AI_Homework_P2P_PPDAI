@@ -16,7 +16,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Iterable, Tuple
 
 import joblib
 import matplotlib.pyplot as plt
@@ -195,6 +195,133 @@ def _configure_matplotlib_font(logger) -> None:
     logger.warning("未找到可用于中文显示的字体，将继续使用默认字体（可能出现缺字）")
 
 
+FEATURE_DISPLAY_NAME_MAP: Dict[str, str] = {
+    "loan_amount": "借款金额",
+    "loan_term": "借款期限",
+    "interest_rate": "借款利率",
+    "loan_type": "借款类型",
+    "rating": "初始评级",
+    "first_loan_flag": "是否首标",
+    "user_age": "借款人年龄",
+    "user_gender": "借款人性别",
+    "phone_verified": "手机认证",
+    "hukou_verified": "户口认证",
+    "video_verified": "视频认证",
+    "education_verified": "学历认证",
+    "credit_verified": "征信认证",
+    "taobao_verified": "淘宝认证",
+    "history_total_loans": "历史成功借款次数",
+    "history_total_amount": "历史成功借款金额",
+    "outstanding_principal": "总待还本金",
+    "history_normal_terms": "历史正常还款期数",
+    "history_overdue_terms": "历史逾期还款期数",
+    "history_repay_ratio": "历史还款率",
+    "history_overdue_rate": "历史逾期率",
+    "loan_amount_per_term": "单期借款金额",
+    "history_avg_loan_amount": "历史平均借款金额",
+    "loan_amount_ratio_to_history_avg": "借款金额/历史平均",
+    "history_avg_term_payment": "历史平均期还金额",
+    "loan_amount_to_history_amount_ratio": "借款金额/历史总额",
+    "outstanding_to_history_amount_ratio": "待还本金/历史总额",
+    "rating_numeric": "评级数值化",
+    "loan_amount_rating_interaction": "借款金额×评级",
+    "loan_term_rating_interaction": "借款期限×评级",
+    "loan_amount_history_repay_ratio": "借款金额×历史还款率",
+    "loan_term_history_overdue_rate": "借款期限×历史逾期率",
+    "loan_date_year": "借款年份",
+    "loan_date_quarter": "借款季度",
+    "loan_date_month": "借款月份",
+    "loan_date_weekday": "借款星期",
+}
+
+CATEGORY_PREFIX_DISPLAY: Dict[str, str] = {
+    "loan_type": "借款类型",
+    "rating": "初始评级",
+    "user_gender": "借款人性别",
+    "loan_date_year": "借款年份",
+    "loan_date_quarter": "借款季度",
+    "loan_date_month": "借款月份",
+    "loan_date_weekday": "借款星期",
+}
+
+WEEKDAY_NAME_MAP: Dict[str, str] = {
+    "0": "周一",
+    "1": "周二",
+    "2": "周三",
+    "3": "周四",
+    "4": "周五",
+    "5": "周六",
+    "6": "周日",
+}
+
+UNKNOWN_CATEGORY_VALUES = {"", "nan", "none", "null", "unknown", "-1", "-1.0", "NaN", "None", "UNK"}
+
+
+def _format_category_value(base: str, raw_value: str) -> str:
+    value = str(raw_value).strip()
+    lower_value = value.lower()
+    if value in UNKNOWN_CATEGORY_VALUES or lower_value in UNKNOWN_CATEGORY_VALUES:
+        return "未知"
+
+    if base == "loan_date_year":
+        return f"{value}年"
+    if base == "loan_date_quarter":
+        return f"第{value}季度"
+    if base == "loan_date_month":
+        return f"{value}月"
+    if base == "loan_date_weekday":
+        return WEEKDAY_NAME_MAP.get(value, f"周{value}")
+
+    return value.replace("__", "/").replace("_", " ")
+
+
+def _build_feature_display_map(columns: Iterable[str]) -> Dict[str, str]:
+    display_map: Dict[str, str] = {}
+    used_names: set[str] = set()
+
+    for col in columns:
+        display_name = FEATURE_DISPLAY_NAME_MAP.get(col)
+
+        if display_name is None:
+            for base, prefix_display in CATEGORY_PREFIX_DISPLAY.items():
+                prefix = f"{base}_"
+                if col.startswith(prefix):
+                    raw_value = col[len(prefix) :]
+                    formatted_value = _format_category_value(base, raw_value)
+                    display_name = f"{prefix_display}={formatted_value}"
+                    break
+
+        if display_name is None:
+            display_name = FEATURE_DISPLAY_NAME_MAP.get(col.split("__")[0], col)
+
+        original_display_name = display_name
+        duplicate_index = 1
+        while display_name in used_names:
+            duplicate_index += 1
+            display_name = f"{original_display_name} ({duplicate_index})"
+
+        display_map[col] = display_name
+        used_names.add(display_name)
+
+    return display_map
+
+
+MODEL_DISPLAY_NAME_MAP: Dict[str, str] = {
+    "lightgbm": "LightGBM",
+    "lgbm": "LightGBM",
+    "xgboost": "XGBoost",
+    "catboost": "CatBoost",
+    "random_forest": "Random Forest",
+    "gbdt": "GBDT",
+    "logistic_regression": "Logistic Regression",
+}
+
+
+def _get_model_display_name(model_name: str) -> str:
+    key = str(model_name).lower()
+    return MODEL_DISPLAY_NAME_MAP.get(key, model_name)
+
+
 def _export_shap_values(
     estimator,
     X_reference: pd.DataFrame,
@@ -222,6 +349,10 @@ def _export_shap_values(
     else:
         sample = X_reference.copy()
 
+    feature_display_map = _build_feature_display_map(sample.columns)
+    display_sample = sample.rename(columns=feature_display_map)
+    display_columns = [feature_display_map.get(col, col) for col in sample.columns]
+
     logger.info("生成模型 %s 的 SHAP 分析样本量=%s", model_name, len(sample))
     try:
         explainer = shap.TreeExplainer(estimator)
@@ -231,19 +362,26 @@ def _export_shap_values(
 
         shap.summary_plot(
             shap_values,
-            sample,
+            display_sample,
             show=False,
             plot_type="bar",
             max_display=min(25, sample.shape[1]),
         )
+        model_display_name = _get_model_display_name(model_name)
+        ax = plt.gca()
+        ax.set_title(f"{model_display_name} SHAP 特征影响力", fontweight="bold")
         fig_path = figures_dir / f"shap_summary_{model_name}.png"
         plt.tight_layout()
         plt.savefig(fig_path, dpi=300)
         plt.close()
 
-        shap_table = pd.DataFrame(shap_values, columns=sample.columns)
+        shap_table = pd.DataFrame(shap_values, columns=display_columns)
         shap_table.insert(0, "model", model_name)
-        shap_table.to_csv(tables_dir / f"shap_values_{model_name}.csv", index=False)
+        shap_table.to_csv(
+            tables_dir / f"shap_values_{model_name}.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
         logger.info("SHAP 结果已输出：%s, %s", fig_path, tables_dir / f"shap_values_{model_name}.csv")
     except (ValueError, AttributeError, TypeError) as e:
         logger.warning("模型 %s 的 SHAP 分析失败（可能是版本兼容性问题）：%s", model_name, str(e))
@@ -402,13 +540,18 @@ def run_pipeline(config_path: Path) -> None:
         logger.info("模型已保存：%s", model_path)
 
         history_df = pd.DataFrame(result.history)
-        history_df.to_csv(artifacts_dir / f"{model_name}_tuning_history.csv", index=False)
+        history_df.to_csv(
+            artifacts_dir / f"{model_name}_tuning_history.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
         threshold_search_path = None
         if threshold_history:
             threshold_search_path = artifacts_dir / f"{model_name}_threshold_search.csv"
             pd.DataFrame(threshold_history).to_csv(
                 threshold_search_path,
                 index=False,
+                encoding="utf-8-sig",
             )
 
         if has_test:
@@ -464,7 +607,7 @@ def run_pipeline(config_path: Path) -> None:
                     "importance": importances,
                 }).sort_values("importance", ascending=False)
                 fi_path = tables_dir / f"feature_importance_{model_name}.csv"
-                fi_df.to_csv(fi_path, index=False)
+                fi_df.to_csv(fi_path, index=False, encoding="utf-8-sig")
                 logger.info("特征重要性已输出：%s", fi_path)
         except Exception as e:
             logger.warning("导出特征重要性失败：%s", e)
@@ -497,13 +640,21 @@ def run_pipeline(config_path: Path) -> None:
 
     if metrics_records:
         metrics_table = pd.concat(metrics_records, ignore_index=True)
-        metrics_table.to_csv(tables_dir / "model_metrics.csv", index=False)
+        metrics_table.to_csv(
+            tables_dir / "model_metrics.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
         metrics_table.to_json(tables_dir / "model_metrics.json", orient="records", force_ascii=False)
         logger.info("模型评估指标已写入 outputs/reports/tables/model_metrics.csv")
 
     if threshold_summaries:
         threshold_df = pd.DataFrame(threshold_summaries)
-        threshold_df.to_csv(tables_dir / "threshold_summary.csv", index=False)
+        threshold_df.to_csv(
+            tables_dir / "threshold_summary.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
         logger.info("阈值调优摘要已写入 outputs/reports/tables/threshold_summary.csv")
 
     logger.info("模型训练流程结束")

@@ -8,7 +8,7 @@
 
 ### 2. 测试类型与示例
 - **单元测试（待补充）**
-  - 标签生成：`_label_from_lcis`、`_label_from_lp`、`generate_labels`。
+  - 样本与标签：`build_samples_with_labels`、`generate_labels`。
   - 数据清洗：`clean_lc`（年龄裁剪、二值字段标准化、缺失填补）。
   - 特征构造：`build_feature_dataframe`（输出列、缺失率、数值字段类型）。
   - 模型训练：`_train_with_cv`、`train_model`（参数网格遍历、异常路径）。

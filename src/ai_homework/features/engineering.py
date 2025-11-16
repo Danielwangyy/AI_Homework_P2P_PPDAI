@@ -1,158 +1,226 @@
-"""特征工程模块。
+"""Feature engineering module restricted to `LC_labeled_samples.csv`.
 
-文件结构遵循“单一职责”原则：
-- `add_time_features`：日期字段拆分；
-- `add_derived_features`：基于历史记录构造比率、均值等；
-- `compute_lp_features`：将还款计划按借款 ID 汇总；
-- `build_feature_dataframe`：将所有特征合并到一起。
-
-函数名和注释都尽量贴近业务含义，帮助初学者理解。
+All derived features must originate from the sample dataset itself
+to avoid reintroducing data leakage from raw LC/LP/LCIS tables.
 """
 from __future__ import annotations
 
-from typing import Dict, Iterable
+from typing import Dict, Iterable, Optional
 
 import numpy as np
 import pandas as pd
 
+from .constants import (
+    ALIAS_MAP,
+    ALL_BLACKLIST_COLUMNS,
+    BINARY_ALIAS_COLUMNS,
+    CATEGORICAL_ALIAS_COLUMNS,
+    METADATA_COLUMNS,
+    NUMERIC_ALIAS_COLUMNS,
+    SAFE_RAW_COLUMNS,
+)
+
+YES_VALUES = {"是", "Y", "YES", "TRUE", "T", "1", "1.0"}
+NO_VALUES = {"否", "N", "NO", "FALSE", "F", "0", "0.0"}
+
+RATING_SCORE = {
+    "AAA": 8,
+    "AA": 7,
+    "A": 6,
+    "B": 5,
+    "C": 4,
+    "D": 3,
+    "E": 2,
+    "F": 1,
+}
+
+
+def _to_datetime(series: pd.Series) -> pd.Series:
+    return pd.to_datetime(series, errors="coerce")
+
+
+def _to_numeric(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce")
+
+
+def _safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    denom = denominator.replace({0: np.nan})
+    result = numerator.astype(float) / denom
+    return result.replace([np.inf, -np.inf], np.nan)
+
+
+def _normalize_binary(series: pd.Series) -> pd.Series:
+    def mapper(value: object) -> float | np.nan:
+        if pd.isna(value):
+            return np.nan
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if np.isnan(value):
+                return np.nan
+            return 1.0 if value > 0 else 0.0
+        text = str(value).strip().upper()
+        if text in YES_VALUES or value is True:
+            return 1.0
+        if text in NO_VALUES or value is False:
+            return 0.0
+        return np.nan
+
+    return series.apply(mapper)
+
+
+def _rating_to_numeric(series: pd.Series) -> pd.Series:
+    if series.empty:
+        return pd.Series(dtype=float)
+
+    def mapper(value: object) -> float:
+        if pd.isna(value):
+            return 0.0
+        text = str(value).strip().upper()
+        if text in RATING_SCORE:
+            return float(RATING_SCORE[text])
+        if text and text[0] in RATING_SCORE:
+            return float(RATING_SCORE[text[0]])
+        return 0.0
+
+    return series.apply(mapper).astype(float)
+
+
+def add_domain_aliases(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for alias, source_col in ALIAS_MAP.items():
+        if alias in df.columns:
+            continue
+        if source_col in df.columns:
+            df[alias] = df[source_col]
+        else:
+            df[alias] = np.nan
+
+    for col in NUMERIC_ALIAS_COLUMNS:
+        if col in df.columns:
+            df[col] = _to_numeric(df[col]).fillna(0.0).astype(float)
+
+    if "loan_date" in df.columns:
+        df["loan_date"] = _to_datetime(df["loan_date"])
+
+    for col in BINARY_ALIAS_COLUMNS:
+        if col in df.columns:
+            df[col] = _normalize_binary(df[col]).fillna(0.0)
+
+    for col in CATEGORICAL_ALIAS_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].fillna("未知").astype(str)
+
+    return df
+
 
 def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
-    """从借款成功日期中衍生出 year/month/quarter/weekday。"""
-    if "借款成功日期" not in df.columns:
-        return df
-    temp = pd.to_datetime(df["借款成功日期"], errors="coerce")
-    df["借款成功日期_year"] = temp.dt.year.fillna(-1).astype(int).astype(str)
-    df["借款成功日期_month"] = temp.dt.month.fillna(-1).astype(int).astype(str)
-    df["借款成功日期_quarter"] = temp.dt.quarter.fillna(-1).astype(int).astype(str)
-    df["借款成功日期_weekday"] = temp.dt.weekday.fillna(-1).astype(int).astype(str)
-    return df
+    loan_date = df["loan_date"]
 
-
-def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
-    """构造一系列基于历史表现的比率与均值特征。"""
-    df = df.copy()
-
-    def _get_series(name: str) -> pd.Series:
-        if name in df.columns:
-            return df[name].astype(float)
-        return pd.Series(0.0, index=df.index, dtype=float)
-
-    history_normal = _get_series("历史正常还款期数")
-    history_overdue = _get_series("历史逾期还款期数")
-    total_periods = history_normal + history_overdue
-    total_periods = total_periods.replace(0, np.nan)
-
-    df["历史逾期率"] = (history_overdue / total_periods).fillna(0.0)
-    df["历史还款能力指数"] = (history_normal / total_periods).fillna(0.0)
-
-    history_amount = _get_series("历史成功借款金额")
-    current_amount = _get_series("借款金额")
-    total_principal_outstanding = _get_series("总待还本金")
-
-    denom_amount = history_amount.replace({0: np.nan})
-    df["借款杠杆比"] = (
-        current_amount / denom_amount
-    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    df["待还本金占比"] = (
-        total_principal_outstanding / denom_amount
-    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    loan_term = _get_series("借款期限").replace(0, np.nan)
-    df["借款金额每期"] = (current_amount / loan_term).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    history_count = _get_series("历史成功借款次数").replace(0, np.nan)
-    history_avg_amount = (
-        history_amount / history_count
-    ).replace([np.inf, -np.inf], np.nan)
-    df["历史平均借款金额"] = history_avg_amount.fillna(0.0)
-
-    df["借款金额相对历史平均"] = (
-        current_amount / history_avg_amount.replace(0, np.nan)
-    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    df["历史平均每期还款额"] = (
-        history_amount / total_periods
-    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    df["历史还款净差"] = history_normal - history_overdue
+    df["loan_date_year"] = loan_date.dt.year.fillna(-1).astype(int).astype(str)
+    df["loan_date_quarter"] = loan_date.dt.quarter.fillna(-1).astype(int).astype(str)
+    df["loan_date_month"] = loan_date.dt.month.fillna(-1).astype(int).astype(str)
+    df["loan_date_weekday"] = loan_date.dt.weekday.fillna(-1).astype(int).astype(str)
 
     return df
 
 
-def compute_lp_features(lp: pd.DataFrame, id_col: str) -> pd.DataFrame:
-    """将 LP 明细表聚合为“借款计划”级别的特征。"""
-    if lp.empty or id_col not in lp.columns:
-        return pd.DataFrame(columns=[id_col])
+def add_ratio_features(df: pd.DataFrame) -> pd.DataFrame:
+    history_normal = df["history_normal_terms"]
+    history_overdue = df["history_overdue_terms"]
+    total_terms = history_normal + history_overdue
+    total_terms = total_terms.replace(0, np.nan)
 
-    temp = lp.copy()
-    grouped = temp.groupby(id_col, dropna=False)
-    features = grouped.agg(
-        lp总期数=("期数", "max"),
-        lp计划总本金=("应还本金", "sum"),
-        lp计划总利息=("应还利息", "sum"),
-        lp平均期本金=("应还本金", "mean"),
-        lp平均期利息=("应还利息", "mean"),
-    )
+    df["history_repay_ratio"] = _safe_divide(history_normal, total_terms).fillna(0.0)
+    df["history_overdue_rate"] = _safe_divide(history_overdue, total_terms).fillna(0.0)
 
-    features["lp平均期本息"] = (
-        features["lp平均期本金"].fillna(0.0) + features["lp平均期利息"].fillna(0.0)
-    )
+    df["loan_amount_per_term"] = _safe_divide(df["loan_amount"], df["loan_term"]).fillna(0.0)
+    df["history_avg_loan_amount"] = _safe_divide(df["history_total_amount"], df["history_total_loans"]).fillna(0.0)
+    df["loan_amount_ratio_to_history_avg"] = _safe_divide(df["loan_amount"], df["history_avg_loan_amount"]).fillna(0.0)
+    df["history_avg_term_payment"] = _safe_divide(df["history_total_amount"], total_terms).fillna(0.0)
 
-    if "到期日期" in temp.columns:
-        schedule_span = grouped["到期日期"].agg(lambda s: (s.max() - s.min()).days if s.notna().any() else 0)
-        features["lp计划周期天数"] = schedule_span.fillna(0)
+    df["loan_amount_to_history_amount_ratio"] = _safe_divide(
+        df["loan_amount"], df["history_total_amount"]
+    ).fillna(0.0)
+    df["outstanding_to_history_amount_ratio"] = _safe_divide(
+        df["outstanding_principal"], df["history_total_amount"]
+    ).fillna(0.0)
 
-    return features.reset_index()
+    df["loan_amount_history_repay_ratio"] = (df["loan_amount"] * df["history_repay_ratio"]).fillna(0.0)
+    df["loan_term_history_overdue_rate"] = (df["loan_term"] * df["history_overdue_rate"]).fillna(0.0)
+
+    return df
+
+
+def add_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
+    df["rating_numeric"] = _rating_to_numeric(df["rating"])
+
+    df["loan_amount_rating_interaction"] = (df["loan_amount"] * df["rating_numeric"]).fillna(0.0)
+    df["loan_term_rating_interaction"] = (df["loan_term"] * df["rating_numeric"]).fillna(0.0)
+
+    return df
 
 
 def build_feature_dataframe(
-    cleaned_lc: pd.DataFrame,
-    lp: pd.DataFrame,
-    labels: pd.DataFrame,
-    cfg: Dict[str, Iterable[str]],
+    samples: pd.DataFrame,
+    _cfg: Dict[str, Iterable[str]],
     id_col: str,
+    *,
+    logger: Optional[object] = None,
 ) -> pd.DataFrame:
-    """综合 LC 清洗结果、LP 聚合特征与标签，生成最终特征表。"""
-    categorical_cols = cfg.get("categorical_features", [])
-    binary_cols = cfg.get("binary_features", [])
-    numeric_cols = list(cfg.get("numeric_features", []))
-    extra_numeric_cols = cfg.get("lp_numeric_features", [])
+    """Construct feature table using only application-time information."""
+    df = samples.copy()
+    df.attrs = {}
 
-    df = add_time_features(cleaned_lc)
-    df = add_derived_features(df)
+    if id_col not in df.columns:
+        raise KeyError(f"样本数据缺少唯一标识列 {id_col}")
 
-    # 合并标签，包括is_valid列（如果存在）
-    label_cols = [id_col, "label"]
-    if "is_valid" in labels.columns:
-        label_cols.append("is_valid")
-    if "lcis_label" in labels.columns:
-        label_cols.append("lcis_label")
-    if "lp_label" in labels.columns:
-        label_cols.append("lp_label")
-    
-    df = df.merge(labels[label_cols], on=id_col, how="left")
+    initial_columns = set(df.columns)
+    blacklist_cols = sorted(initial_columns & ALL_BLACKLIST_COLUMNS)
+    if blacklist_cols:
+        df = df.drop(columns=blacklist_cols, errors="ignore")
+        if logger:
+            logger.info("特征工程：剔除黑名单字段 %s", blacklist_cols)
 
-    lp_features = compute_lp_features(lp, id_col)
-    if not lp_features.empty:
-        df = df.merge(lp_features, on=id_col, how="left")
+    whitelist = SAFE_RAW_COLUMNS | {id_col}
+    whitelist_drop = sorted(set(df.columns) - whitelist)
+    if whitelist_drop:
+        df = df.drop(columns=whitelist_drop, errors="ignore")
+        if logger:
+            logger.info("特征工程：因白名单限制排除字段 %s", whitelist_drop)
 
-    inferred_numeric_cols = set(extra_numeric_cols or [])
-    if not lp_features.empty:
-        inferred_numeric_cols.update(
-            col for col in lp_features.columns if col != id_col
-        )
+    missing_required = sorted((whitelist - {id_col}) - set(df.columns))
+    for col in missing_required:
+        df[col] = np.nan
+    if missing_required and logger:
+        logger.warning("特征工程：白名单字段缺失，已填充缺省值 %s", missing_required)
 
-    for col in set(numeric_cols).union(inferred_numeric_cols):
-        if col in df.columns:
-            df[col] = df[col].fillna(0.0)
+    date_col = ALIAS_MAP.get("loan_date", "借款成功日期")
+    if date_col in df.columns:
+        df[date_col] = _to_datetime(df[date_col])
 
-    for col in binary_cols:
-        if col in df.columns:
-            df[col] = df[col].fillna(0.0)
+    df = add_domain_aliases(df)
+    df = add_time_features(df)
+    df = add_ratio_features(df)
+    df = add_interaction_features(df)
 
-    for col in categorical_cols:
-        if col in df.columns:
-            df[col] = df[col].fillna("未知").astype(str)
+    raw_cols_to_remove = (SAFE_RAW_COLUMNS - {id_col}) & set(df.columns)
+    if raw_cols_to_remove:
+        df = df.drop(columns=raw_cols_to_remove)
+
+    remaining_leak = sorted(set(df.columns) & ALL_BLACKLIST_COLUMNS)
+    if remaining_leak:
+        raise AssertionError(f"检测到未剔除的泄露字段: {remaining_leak}")
+
+    for meta_col in METADATA_COLUMNS:
+        if meta_col not in df.columns:
+            df[meta_col] = pd.NaT
+
+    df.attrs = {
+        "dropped_blacklist_columns": blacklist_cols,
+        "dropped_whitelist_columns": whitelist_drop,
+        "missing_whitelist_columns": missing_required,
+        "metadata_columns": list(METADATA_COLUMNS),
+        "retained_columns": list(df.columns),
+    }
 
     return df
 

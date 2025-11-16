@@ -8,17 +8,20 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Iterable, Tuple
+import re
+from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
 import joblib
+import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 from ..data.cleaning import clean_lc, clean_lp, clean_lcis, generate_anomaly_statistics
-from ..data.labeling import generate_labels
+from ..data.labeling import build_samples_with_labels, generate_labels
 from ..data.loading import load_raw_data
 from ..features.engineering import build_feature_dataframe
+from ..features.selection import select_features
 from ..utils.config import load_yaml
 from ..utils.logger import get_logger, setup_logger
 
@@ -48,6 +51,207 @@ def _resolve_path(path_str: str | None) -> Path | None:
     return candidate
 
 
+def _resolve_drop_columns(
+    columns: Sequence[str],
+    rules: Dict[str, Sequence[str]] | None,
+    logger,
+) -> Set[str]:
+    drop: Set[str] = set()
+    if not rules:
+        return drop
+
+    for name in rules.get("exact", []) or []:
+        if name in columns:
+            drop.add(name)
+
+    for prefix in rules.get("prefixes", []) or []:
+        drop.update(col for col in columns if col.startswith(prefix))
+
+    for suffix in rules.get("suffixes", []) or []:
+        drop.update(col for col in columns if col.endswith(suffix))
+
+    for substring in rules.get("contains", []) or []:
+        drop.update(col for col in columns if substring in col)
+
+    for pattern in rules.get("regex", []) or []:
+        try:
+            compiled = re.compile(pattern)
+        except re.error as exc:
+            if logger:
+                logger.warning("特征消融：正则表达式 %s 无效，跳过。错误：%s", pattern, exc)
+            continue
+        drop.update(col for col in columns if compiled.search(col))
+
+    return drop
+
+
+def _apply_feature_drops(
+    df: pd.DataFrame,
+    rules: Dict[str, Sequence[str]] | None,
+    logger,
+    stage: str,
+    *,
+    protected_cols: Set[str] | None = None,
+) -> tuple[pd.DataFrame, List[str]]:
+    """按配置规则移除特征列，用于快速执行消融实验。"""
+
+    drop_candidates = _resolve_drop_columns(df.columns, rules, logger)
+    if protected_cols:
+        drop_candidates -= {col for col in protected_cols if col in drop_candidates}
+
+    drop_existing = sorted(col for col in drop_candidates if col in df.columns)
+    if not drop_existing:
+        return df, []
+
+    logger.info("特征消融[%s]：移除列 %s", stage, drop_existing)
+    return df.drop(columns=drop_existing, errors="ignore"), drop_existing
+
+
+def _check_consistency_between_lc_lp(
+    lc_df: pd.DataFrame,
+    lp_df: pd.DataFrame,
+    id_col: str,
+    *,
+    principal_rel_tol: float = 0.05,
+    principal_abs_tol: float = 1.0,
+    term_tol: float = 1.0,
+) -> tuple[dict, dict]:
+    """校验借款金额/期限与 LP 汇总指标的一致性。
+
+    返回:
+        summary: 各项校验的摘要统计
+        details: 具体不一致记录的 DataFrame 字典
+    """
+    summary: dict = {}
+    details: dict = {}
+
+    # 借款金额 vs LP 应还本金总和
+    required_lc_cols = {id_col, "借款金额"}
+    required_lp_cols = {id_col, "应还本金"}
+    if required_lc_cols.issubset(lc_df.columns) and required_lp_cols.issubset(lp_df.columns):
+        lc_amount = lc_df[list(required_lc_cols)].copy()
+        lc_amount["借款金额"] = pd.to_numeric(lc_amount["借款金额"], errors="coerce")
+
+        lp_principal = lp_df[list(required_lp_cols)].copy()
+        lp_principal["应还本金"] = pd.to_numeric(lp_principal["应还本金"], errors="coerce")
+        lp_grouped = (
+            lp_principal.groupby(id_col, dropna=False)["应还本金"]
+            .sum(min_count=1)
+            .reset_index(name="lp应还本金合计")
+        )
+
+        merged_principal = lc_amount.merge(lp_grouped, on=id_col, how="inner")
+        available_mask = merged_principal["借款金额"].notna() & merged_principal["lp应还本金合计"].notna()
+        checked_principal = merged_principal[available_mask].copy()
+
+        total_checked = len(checked_principal)
+        if total_checked > 0:
+            diff = (checked_principal["lp应还本金合计"] - checked_principal["借款金额"]).abs()
+            denom = checked_principal["借款金额"].abs()
+            relative_diff = pd.Series(np.nan, index=checked_principal.index, dtype=float)
+            positive_denom = denom > 0
+            relative_diff.loc[positive_denom] = diff.loc[positive_denom] / denom.loc[positive_denom]
+
+            mismatch_mask = pd.Series(False, index=checked_principal.index)
+            mismatch_mask.loc[positive_denom] = relative_diff.loc[positive_denom] > principal_rel_tol
+            mismatch_mask.loc[~positive_denom] = diff.loc[~positive_denom] > principal_abs_tol
+
+            mismatch_count = int(mismatch_mask.sum())
+            summary["principal"] = {
+                "status": "ok",
+                "total_checked": total_checked,
+                "mismatch_count": mismatch_count,
+                "mismatch_rate": round(mismatch_count / total_checked * 100, 4),
+                "relative_tolerance": principal_rel_tol,
+                "absolute_tolerance": principal_abs_tol,
+            }
+
+            if mismatch_count > 0:
+                issue_cols = [
+                    id_col,
+                    "借款金额",
+                    "lp应还本金合计",
+                ]
+                detail_df = checked_principal.loc[mismatch_mask, issue_cols].copy()
+                detail_df["差值"] = (
+                    detail_df["lp应还本金合计"] - detail_df["借款金额"]
+                )
+                detail_df["相对误差"] = detail_df["差值"] / detail_df["借款金额"].replace(0, np.nan)
+                details["principal"] = detail_df
+            else:
+                details["principal"] = pd.DataFrame(columns=[id_col, "借款金额", "lp应还本金合计", "差值", "相对误差"])
+        else:
+            summary["principal"] = {
+                "status": "ok",
+                "total_checked": 0,
+                "mismatch_count": 0,
+                "mismatch_rate": 0.0,
+                "relative_tolerance": principal_rel_tol,
+                "absolute_tolerance": principal_abs_tol,
+            }
+            details["principal"] = pd.DataFrame(columns=[id_col, "借款金额", "lp应还本金合计", "差值", "相对误差"])
+    else:
+        summary["principal"] = {
+            "status": "skipped",
+            "reason": "缺少借款金额或应还本金列",
+        }
+        details["principal"] = pd.DataFrame(columns=[id_col, "借款金额", "lp应还本金合计", "差值", "相对误差"])
+
+    # 借款期限 vs LP 最大期数
+    required_lp_term_cols = {id_col, "期数"}
+    if {id_col, "借款期限"}.issubset(lc_df.columns) and required_lp_term_cols.issubset(lp_df.columns):
+        lc_term = lc_df[[id_col, "借款期限"]].copy()
+        lc_term["借款期限"] = pd.to_numeric(lc_term["借款期限"], errors="coerce")
+
+        lp_periods = lp_df[list(required_lp_term_cols)].copy()
+        lp_periods["期数"] = pd.to_numeric(lp_periods["期数"], errors="coerce")
+        lp_max_period = (
+            lp_periods.groupby(id_col, dropna=False)["期数"]
+            .max()
+            .reset_index(name="lp最大期数")
+        )
+
+        merged_term = lc_term.merge(lp_max_period, on=id_col, how="inner")
+        available_mask = merged_term["借款期限"].notna() & merged_term["lp最大期数"].notna()
+        checked_term = merged_term[available_mask].copy()
+
+        total_checked = len(checked_term)
+        if total_checked > 0:
+            diff = (checked_term["lp最大期数"] - checked_term["借款期限"]).abs()
+            mismatch_mask = diff > term_tol
+            mismatch_count = int(mismatch_mask.sum())
+            summary["term"] = {
+                "status": "ok",
+                "total_checked": total_checked,
+                "mismatch_count": mismatch_count,
+                "mismatch_rate": round(mismatch_count / total_checked * 100, 4),
+                "tolerance": term_tol,
+            }
+            if mismatch_count > 0:
+                detail_df = checked_term.loc[mismatch_mask, [id_col, "借款期限", "lp最大期数"]].copy()
+                detail_df["差值"] = detail_df["lp最大期数"] - detail_df["借款期限"]
+                details["term"] = detail_df
+            else:
+                details["term"] = pd.DataFrame(columns=[id_col, "借款期限", "lp最大期数", "差值"])
+        else:
+            summary["term"] = {
+                "status": "ok",
+                "total_checked": 0,
+                "mismatch_count": 0,
+                "mismatch_rate": 0.0,
+                "tolerance": term_tol,
+            }
+            details["term"] = pd.DataFrame(columns=[id_col, "借款期限", "lp最大期数", "差值"])
+    else:
+        summary["term"] = {
+            "status": "skipped",
+            "reason": "缺少借款期限或期数列",
+        }
+        details["term"] = pd.DataFrame(columns=[id_col, "借款期限", "lp最大期数", "差值"])
+
+    return summary, details
+
+
 def _export_feature_analysis(
     feature_df: pd.DataFrame,
     numeric_cols: Iterable[str],
@@ -58,6 +262,11 @@ def _export_feature_analysis(
 
     该步骤在初始建模时很有帮助，可快速了解特征质量与与标签的关联性。
     配置项为空时自动跳过，减少对主流程的干扰。
+
+    业务解读：
+    - 特征统计表能快速让业务方了解每个指标的分布与缺失情况，判断是否符合业务认知；
+    - 与标签的相关度提醒业务人员关注可能影响违约率的关键因素；
+    - 高相关特征对提示存在信息重复的指标，帮助业务在口径或指标体系上做取舍。
     """
     summary_path = _resolve_path(analysis_cfg.get("summary_path"))
     high_corr_path = _resolve_path(analysis_cfg.get("high_corr_path"))
@@ -84,6 +293,7 @@ def _export_feature_analysis(
                 "std": float(series.std()),
             }
         )
+        # 业务含义：缺失率反映指标采集是否稳定，均值/方差帮助快速评估客户整体结构
 
     summary_df = pd.DataFrame(summary_records)
 
@@ -96,11 +306,12 @@ def _export_feature_analysis(
         summary_df["abs_corr_with_label"] = summary_df["feature"].map(
             lambda col: float(abs(correlation.get(col, float("nan"))))
         )
+        # 业务含义：相关系数提示该指标与违约结果的线性关系强弱，便于业务侧识别重点风险指标
     else:
         summary_df["abs_corr_with_label"] = float("nan")
 
     summary_df = summary_df.sort_values("abs_corr_with_label", ascending=False, na_position="last")
-    summary_df.to_csv(summary_path, index=False)
+    summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
 
     if high_corr_path:
         threshold = float(analysis_cfg.get("high_corr_threshold", 0.85))
@@ -119,7 +330,12 @@ def _export_feature_analysis(
                             "abs_corr": float(value),
                         }
                     )
-        pd.DataFrame(records, columns=["feature_a", "feature_b", "abs_corr"]).to_csv(high_corr_path, index=False)
+        # 业务含义：高相关特征对往往来源于相同业务口径，提示需要合并或选取代表性指标，避免重复判断
+        pd.DataFrame(records, columns=["feature_a", "feature_b", "abs_corr"]).to_csv(
+            high_corr_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
 
 
 def _stratified_split(
@@ -204,41 +420,206 @@ def run_pipeline(config_path: Path) -> None:
     logger.info("开始生成异常值统计表")
     anomaly_stats = generate_anomaly_statistics(data["lc"], data["lp"], data["lcis"], cfg)
     anomaly_stats_path = middata_dir / "anomaly_statistics.csv"
-    anomaly_stats.to_csv(anomaly_stats_path, index=False, encoding='utf-8-sig')
-    logger.info("异常值统计表已保存: {} ({} 条记录)".format(anomaly_stats_path, len(anomaly_stats)))
 
     # 清洗三张表（根据规范严格清洗）
     logger.info("开始清洗数据表")
     cleaned_lc = clean_lc(data["lc"], cfg)
-    logger.info("LC 表清洗完成 (添加了新特征: 正常还款比)")
-    
+    logger.info("LC 表清洗完成")
+
     cleaned_lp = clean_lp(data["lp"])
     logger.info("LP 表清洗完成 (还款状态已重新赋值)")
-    
+
     cleaned_lcis = clean_lcis(data["lcis"])
     logger.info("LCIS 表清洗完成 (已处理异常值和无效状态)")
+    lcis_notes = getattr(cleaned_lcis, "attrs", {}).get("cleaning_notes", {})
+    status_invalid_summary = lcis_notes.get("标当前状态_invalid")
+    if status_invalid_summary:
+        total_removed = status_invalid_summary.get("total_removed", 0)
+        value_counts = status_invalid_summary.get("value_counts", {})
+        logger.info(
+            "LCIS 标当前状态剔除非法取值: 共 {} 条，分布={}".format(
+                total_removed, value_counts
+            )
+        )
 
-    # 使用清洗后的数据生成标签
-    logger.info("开始生成标签（使用清洗后的数据）")
+    lc_total_after_cleaning = len(cleaned_lc)
+    lcis_total_after_cleaning = len(cleaned_lcis)
+    clip_records = []
+    for df in (cleaned_lc, cleaned_lcis):
+        records = getattr(df, "attrs", {}).get("clip_records", [])
+        if records:
+            clip_records.extend(records)
+
+    if clip_records:
+        extra_rows = []
+        for record in clip_records:
+            table = record.get("table", "")
+            column = record.get("column", "")
+            count = int(record.get("count", 0))
+            if count <= 0 or not column:
+                continue
+            if table == "LC":
+                total = lc_total_after_cleaning
+            elif table == "LCIS":
+                total = lcis_total_after_cleaning
+            else:
+                total = len(cleaned_lp)
+            threshold = record.get("threshold")
+            if threshold is not None and not pd.isna(threshold):
+                data_item = f"{column}_P99裁剪(阈值={threshold:.2f})"
+            else:
+                data_item = f"{column}_P99裁剪"
+            extra_rows.append(
+                {
+                    "表名": table or "未标注",
+                    "数据项": data_item,
+                    "异常值数量": count,
+                    "总记录数": total,
+                    "异常值占比": round(count / total * 100, 2) if total > 0 else 0.0,
+                }
+            )
+        if extra_rows:
+            anomaly_stats = pd.concat([anomaly_stats, pd.DataFrame(extra_rows)], ignore_index=True)
+            anomaly_stats = anomaly_stats.sort_values(["表名", "数据项"])
+
+    anomaly_stats.to_csv(anomaly_stats_path, index=False, encoding='utf-8-sig')
+    logger.info("异常值统计表已保存: {} ({} 条记录)".format(anomaly_stats_path, len(anomaly_stats)))
+
+    consistency_summary, consistency_details = _check_consistency_between_lc_lp(
+        cleaned_lc, cleaned_lp, id_col=id_col
+    )
+    notes = cleaned_lc.attrs.setdefault("cleaning_notes", {})
+    notes["consistency_checks"] = consistency_summary
+    cleaned_lc.attrs["cleaning_notes"] = notes
+
+    principal_summary = consistency_summary.get("principal", {})
+    if principal_summary.get("status") == "ok":
+        total_checked = principal_summary.get("total_checked", 0)
+        mismatch_count = principal_summary.get("mismatch_count", 0)
+        mismatch_rate = principal_summary.get("mismatch_rate", 0.0)
+        logger.info(
+            "借款金额 vs LP 应还本金一致性：检查 {} 条，超出容差 {} 条，占比 {:.4f}% (相对容差={}, 绝对容差={})".format(
+                total_checked,
+                mismatch_count,
+                mismatch_rate,
+                principal_summary.get("relative_tolerance"),
+                principal_summary.get("absolute_tolerance"),
+            )
+        )
+        principal_issues = consistency_details.get("principal")
+        if principal_issues is not None and not principal_issues.empty:
+            issues_path = middata_dir / "principal_inconsistencies.csv"
+            principal_issues.to_csv(issues_path, index=False, encoding="utf-8-sig")
+            logger.warning(
+                "借款金额与 LP 应还本金不一致记录已导出: {} ({} 条)".format(
+                    issues_path, len(principal_issues)
+                )
+            )
+    else:
+        logger.warning(
+            "借款金额 vs LP 应还本金一致性检查跳过：{}".format(principal_summary.get("reason", "未知原因"))
+        )
+
+    term_summary = consistency_summary.get("term", {})
+    if term_summary.get("status") == "ok":
+        total_checked = term_summary.get("total_checked", 0)
+        mismatch_count = term_summary.get("mismatch_count", 0)
+        mismatch_rate = term_summary.get("mismatch_rate", 0.0)
+        logger.info(
+            "借款期限 vs LP 最大期数一致性：检查 {} 条，超出容差 {} 条，占比 {:.4f}% (容差={})".format(
+                total_checked,
+                mismatch_count,
+                mismatch_rate,
+                term_summary.get("tolerance"),
+            )
+        )
+        term_issues = consistency_details.get("term")
+        if term_issues is not None and not term_issues.empty:
+            issues_path = middata_dir / "term_inconsistencies.csv"
+            term_issues.to_csv(issues_path, index=False, encoding="utf-8-sig")
+            logger.warning(
+                "借款期限与 LP 最大期数不一致记录已导出: {} ({} 条)".format(issues_path, len(term_issues))
+            )
+    else:
+        logger.warning(
+            "借款期限 vs LP 最大期数一致性检查跳过：{}".format(term_summary.get("reason", "未知原因"))
+        )
+
+    # 使用清洗后的数据构建有效样本并生成标签
+    logger.info("开始构建有效样本与标签")
     cleaned_data = {
         "lc": cleaned_lc,
         "lp": cleaned_lp,
         "lcis": cleaned_lcis
     }
-    labels = generate_labels(cleaned_data, id_col=id_col)
-    
-    # 统计标签分布
-    valid_labels = labels[labels["is_valid"] == True]
-    invalid_labels = labels[labels["is_valid"] == False]
-    logger.info("标签生成完成：总记录数={}，有效标签={}，无效标签={}".format(
-        len(labels), len(valid_labels), len(invalid_labels)
-    ))
-    if len(valid_labels) > 0:
-        label_counts = valid_labels["label"].value_counts()
-        logger.info("有效标签分布：")
-        for label_val, count in label_counts.items():
-            label_name = "已还清（正常）" if label_val == 0 else "逾期中（违约）"
-            logger.info("  - {} (标签={}): {} 条".format(label_name, label_val, count))
+    samples_df = build_samples_with_labels(cleaned_lc, cleaned_lp, cleaned_lcis, id_col=id_col)
+    invalid_samples = samples_df.attrs.get("invalid_samples")
+    if samples_df.empty:
+        raise ValueError("未找到符合样本定义的记录，无法继续数据准备")
+
+    # 保存样本数据集
+    samples_output_path = middata_dir / "LC_labeled_samples.csv"
+    samples_to_save = samples_df.copy()
+    sample_date_cols = [
+        "借款成功日期",
+        "借款理论到期日期",
+        "lp_last_due_date",
+        "lp_last_repay_date",
+        "lp_recorddate",
+        "lcis_recorddate",
+    ]
+    for col in sample_date_cols:
+        if col in samples_to_save.columns and pd.api.types.is_datetime64_any_dtype(samples_to_save[col]):
+            samples_to_save[col] = samples_to_save[col].apply(
+                lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else ''
+            )
+    sample_column_rename = {
+        "sum_DPD": "逾期天数总和",
+        "label": "违约标签",
+        "label_source": "标签来源",
+        "is_effective": "是否周期结束样本",
+        "lp_max_period": "LP最大期数",
+        "lp_last_due_date": "LP最后到期日",
+        "lp_last_repay_date": "LP最后还款日",
+        "lp_recorddate": "LP记录日期",
+        "lcis_recorddate": "LCIS记录日期",
+        "is_valid": "是否有效样本",
+    }
+    samples_export = samples_to_save.rename(
+        columns={k: v for k, v in sample_column_rename.items() if k in samples_to_save.columns}
+    )
+    try:
+        samples_export.to_csv(samples_output_path, index=False, encoding='utf-8-sig')
+        logger.info(
+            "样本集已保存: {} ({} 条记录, {} 个字段)".format(
+                samples_output_path, len(samples_df), len(samples_export.columns)
+            )
+        )
+    except PermissionError as e:
+        logger.error("无法保存样本集，文件可能被占用: {}".format(e))
+
+    invalid_output_path = middata_dir / "LC_invalid_samples.csv"
+    if isinstance(invalid_samples, pd.DataFrame) and not invalid_samples.empty:
+        invalid_to_save = invalid_samples.copy()
+        for col in sample_date_cols:
+            if col in invalid_to_save.columns and pd.api.types.is_datetime64_any_dtype(invalid_to_save[col]):
+                invalid_to_save[col] = invalid_to_save[col].apply(
+                    lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else ''
+                )
+        invalid_export = invalid_to_save.rename(
+            columns={k: v for k, v in sample_column_rename.items() if k in invalid_to_save.columns}
+        )
+        try:
+            invalid_export.to_csv(invalid_output_path, index=False, encoding='utf-8-sig')
+            logger.info(
+                "未到期样本已保存: {} ({} 条记录, {} 个字段)".format(
+                    invalid_output_path, len(invalid_export), len(invalid_export.columns)
+                )
+            )
+        except PermissionError as e:
+            logger.error("无法保存未到期样本，文件可能被占用: {}".format(e))
+    else:
+        logger.info("未到期样本为空，跳过导出")
 
     # 保存清洗后的三张CSV表
     logger.info("开始保存清洗后的CSV表")
@@ -287,34 +668,84 @@ def run_pipeline(config_path: Path) -> None:
         lcis_cleaned_path, len(cleaned_lcis), len(cleaned_lcis.columns)
     ))
 
-    feature_df = build_feature_dataframe(cleaned_lc, cleaned_lp, labels, cfg, id_col)
-    
-    # 只保留有效标签的记录（排除"正常还款中"等未产生结果的记录）
-    if "is_valid" in feature_df.columns:
-        feature_df_valid = feature_df[feature_df["is_valid"] == True].copy()
-        logger.info("过滤无效标签后：{} 条有效记录（原始记录：{} 条）".format(
-            len(feature_df_valid), len(feature_df)
-        ))
-        feature_df = feature_df_valid
-    
-    # 确保标签列存在且有效
-    if "label" not in feature_df.columns:
-        raise ValueError("特征表中缺少标签列")
-    
-    # 检查是否有有效标签
-    valid_label_mask = feature_df["label"].notna()
-    if valid_label_mask.sum() == 0:
-        raise ValueError("没有有效的标签记录，无法进行模型训练")
-    
-    feature_df = feature_df[valid_label_mask].copy()
-    logger.info("最终用于建模的记录数：{} 条".format(len(feature_df)))
-    
+    feature_df = build_feature_dataframe(samples_df, cfg, id_col, logger=logger)
+    feature_attrs = getattr(feature_df, "attrs", {}) or {}
+    dropped_blacklist = feature_attrs.get("dropped_blacklist_columns") or []
+    if dropped_blacklist:
+        logger.info("特征工程：已剔除潜在泄露字段 %s", dropped_blacklist)
+    dropped_whitelist = feature_attrs.get("dropped_whitelist_columns") or []
+    if dropped_whitelist:
+        logger.info("特征工程：白名单外字段在构建时被过滤 %s", dropped_whitelist)
+    missing_whitelist = feature_attrs.get("missing_whitelist_columns") or []
+    if missing_whitelist:
+        logger.warning("特征工程：缺少白名单字段 %s，已使用缺省值填充", missing_whitelist)
+    metadata_columns = set(feature_attrs.get("metadata_columns") or [])
+    feature_drop_cfg = cfg.get("feature_drops") or {}
+    feature_drop_records: Dict[str, List[str]] = dict(feature_attrs.get("feature_drops") or {})
+    if metadata_columns:
+        logger.info("特征工程：保留以下元数据列以供后续处理 %s", sorted(metadata_columns))
+
+    before_drop_cfg = feature_drop_cfg.get("before_encoding")
+    if before_drop_cfg:
+        feature_df, dropped_before = _apply_feature_drops(
+            feature_df,
+            before_drop_cfg,
+            logger,
+            stage="before_encoding",
+            protected_cols={id_col},
+        )
+        if dropped_before:
+            feature_drop_records["before_encoding"] = dropped_before
+            metadata_columns = {col for col in metadata_columns if col in feature_df.columns}
+            feature_attrs["retained_columns"] = [col for col in feature_df.columns]
+    feature_attrs["feature_drops"] = feature_drop_records
+
+    labels = generate_labels(cleaned_data, id_col=id_col, samples_df=samples_df)
+    if "is_valid" not in labels.columns:
+        raise ValueError("标签数据缺少 is_valid 字段，无法识别有效记录")
+
+    valid_labels = labels[labels["is_valid"] == True].copy()
+    invalid_label_count = len(labels) - len(valid_labels)
+    logger.info(
+        "标签生成完成：总记录数={}，有效标签={}，无效标签={}".format(
+            len(labels), len(valid_labels), invalid_label_count
+        )
+    )
+
+    label_column = cfg.get("label_column", "label")
+    if label_column not in valid_labels.columns:
+        raise ValueError(f"标签数据缺少目标列 {label_column}")
+
+    label_counts = valid_labels[label_column].value_counts(dropna=True)
+    if not label_counts.empty:
+        logger.info("有效标签分布：")
+        for label_val, count in label_counts.items():
+            logger.info("  - 标签={}：{} 条".format(label_val, count))
+
+    label_merge_cols = [id_col, label_column]
+    if "is_valid" in valid_labels.columns:
+        label_merge_cols.append("is_valid")
+    feature_df = feature_df.merge(valid_labels[label_merge_cols], on=id_col, how="inner")
+    if feature_df.empty:
+        raise ValueError("特征表与有效标签合并后为空，请检查样本与标签定义")
+    logger.info("特征表合并有效标签后剩余 {} 条记录".format(len(feature_df)))
+
+    target = feature_df[label_column].astype(int)
+
     analysis_cfg = cfg.get("feature_analysis", {})
     if analysis_cfg:
-        _export_feature_analysis(feature_df, cfg.get("numeric_features", []), cfg.get("label_column", "label"), analysis_cfg)
+        _export_feature_analysis(feature_df, cfg.get("numeric_features", []), label_column, analysis_cfg)
+
     interim_path = interim_dir / "loan_master.parquet"
-    feature_df.to_parquet(interim_path, index=False)
+    feature_snapshot = feature_df.copy()
+    feature_snapshot.to_parquet(interim_path, index=False)
     logger.info("中间数据写入 {}".format(interim_path))
+
+    if "is_valid" in feature_df.columns:
+        feature_df = feature_df.drop(columns=["is_valid"])
+    feature_df = feature_df.drop(columns=[label_column])
+    feature_attrs["metadata_columns"] = list(metadata_columns)
+    feature_df.attrs = feature_attrs
 
     categorical_cols = cfg.get("categorical_features", [])
     binary_cols = cfg.get("binary_features", [])
@@ -322,6 +753,25 @@ def run_pipeline(config_path: Path) -> None:
     extra_numeric_cols = cfg.get("lp_numeric_features", [])
     if extra_numeric_cols:
         numeric_cols = list(dict.fromkeys(list(numeric_cols) + list(extra_numeric_cols)))
+
+    raw_categorical_cols = list(categorical_cols)
+    raw_binary_cols = list(binary_cols)
+    raw_numeric_cols = list(numeric_cols)
+
+    categorical_cols = [col for col in raw_categorical_cols if col in feature_df.columns]
+    binary_cols = [col for col in raw_binary_cols if col in feature_df.columns]
+    numeric_cols = [col for col in raw_numeric_cols if col in feature_df.columns]
+
+    removed_categorical = sorted(set(raw_categorical_cols) - set(categorical_cols))
+    removed_binary = sorted(set(raw_binary_cols) - set(binary_cols))
+    removed_numeric = sorted(set(raw_numeric_cols) - set(numeric_cols))
+
+    if removed_categorical:
+        logger.info("特征消融：分类特征中以下字段不存在或已被移除，将跳过 %s", removed_categorical)
+    if removed_binary:
+        logger.info("特征消融：二值特征中以下字段不存在或已被移除，将跳过 %s", removed_binary)
+    if removed_numeric:
+        logger.info("特征消融：数值特征中以下字段不存在或已被移除，将跳过 %s", removed_numeric)
 
     _ensure_columns(feature_df, binary_cols + numeric_cols)
 
@@ -366,10 +816,41 @@ def run_pipeline(config_path: Path) -> None:
         axis=1,
     )
     features = features.loc[:, ~features.columns.duplicated()]
-    target = feature_df["label"].astype(int)
+
+    after_drop_cfg = feature_drop_cfg.get("after_encoding")
+    if after_drop_cfg:
+        features, dropped_after = _apply_feature_drops(
+            features,
+            after_drop_cfg,
+            logger,
+            stage="after_encoding",
+            protected_cols={id_col},
+        )
+        if dropped_after:
+            feature_drop_records["after_encoding"] = dropped_after
+            feature_attrs["feature_drops"] = feature_drop_records
 
     X = features.drop(columns=[id_col])
     ids = feature_df[id_col]
+
+    selection_cfg = cfg.get("feature_selection")
+    X, selected_columns, selection_summary = select_features(X, target, selection_cfg, logger)
+    features = pd.concat([features[[id_col]], X], axis=1)
+    ids = feature_df[id_col]
+
+    if selection_cfg and selection_cfg.get("enable") and selection_summary is not None and not selection_summary.empty:
+        report_path = _resolve_path(selection_cfg.get("report_path"))
+        if report_path is None:
+            reports_dir = PROJECT_ROOT / "outputs" / "reports" / "tables"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            report_path = reports_dir / "feature_selection_summary.csv"
+        else:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            selection_summary.to_csv(report_path, index=False, encoding="utf-8-sig")
+            logger.info("特征选择报告已保存: {}".format(report_path))
+        except PermissionError as exc:
+            logger.warning("无法写入特征选择报告: {}".format(exc))
     
     # 最终检查：确保所有特征都是数值类型
     object_cols = [col for col in X.columns if X[col].dtype == 'object']
@@ -380,35 +861,43 @@ def run_pipeline(config_path: Path) -> None:
             X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0.0).astype(float)
 
     split_strategy = str(cfg.get("split_strategy", "random")).lower()
+    test_size = float(cfg.get("test_size", 0.15))
+    val_size = float(cfg.get("val_size", 0.15))
+    random_state = int(cfg.get("random_state", 42))
+
     if split_strategy == "time":
         logger.info("使用时序切分策略")
-        # 读取切分边界
-        train_end_str = cfg.get("train_end_date", "2016-12-31")
-        val_end_str = cfg.get("val_end_date", "2017-06-30")
-        train_end = pd.to_datetime(train_end_str)
-        val_end = pd.to_datetime(val_end_str)
+        use_random_split = False
+        if "loan_date" not in feature_df.columns:
+            logger.warning("特征表缺少 loan_date 列，无法执行时序切分，将回退到随机分层切分")
+            use_random_split = True
+        else:
+            train_end_str = cfg.get("train_end_date", "2016-12-31")
+            val_end_str = cfg.get("val_end_date", "2017-06-30")
+            train_end = pd.to_datetime(train_end_str)
+            val_end = pd.to_datetime(val_end_str)
 
-        # 基于借款成功日期进行切分
-        dates = pd.to_datetime(feature_df["借款成功日期"], errors="coerce")
-        unknown_mask = dates.isna()
-        train_mask = (dates <= train_end) | unknown_mask
-        val_mask = (~unknown_mask) & (dates > train_end) & (dates <= val_end)
-        test_mask = (~unknown_mask) & (dates > val_end)
+            dates = pd.to_datetime(feature_df["loan_date"], errors="coerce")
+            unknown_mask = dates.isna()
+            train_mask = (dates <= train_end) | unknown_mask
+            val_mask = (~unknown_mask) & (dates > train_end) & (dates <= val_end)
+            test_mask = (~unknown_mask) & (dates > val_end)
 
-        X_train, y_train, ids_train = X[train_mask], target[train_mask], ids[train_mask]
-        X_val, y_val, ids_val = X[val_mask], target[val_mask], ids[val_mask]
-        X_test, y_test, ids_test = X[test_mask], target[test_mask], ids[test_mask]
+            X_train, y_train, ids_train = X[train_mask], target[train_mask], ids[train_mask]
+            X_val, y_val, ids_val = X[val_mask], target[val_mask], ids[val_mask]
+            X_test, y_test, ids_test = X[test_mask], target[test_mask], ids[test_mask]
 
-        if min(len(X_train), len(X_val), len(X_test)) == 0:
-            logger.warning(
-                "时序切分结果存在空集（train={}, val={}, test={}），回退到随机分层切分策略",
-                len(X_train),
-                len(X_val),
-                len(X_test),
-            )
-            test_size = float(cfg.get("test_size", 0.15))
-            val_size = float(cfg.get("val_size", 0.15))
-            random_state = int(cfg.get("random_state", 42))
+            if min(len(X_train), len(X_val), len(X_test)) == 0:
+                logger.warning(
+                    "时序切分结果存在空集（train=%s, val=%s, test=%s），将改用随机分层切分",
+                    len(X_train),
+                    len(X_val),
+                    len(X_test),
+                )
+                use_random_split = True
+
+        if use_random_split:
+            logger.info("改用随机分层切分策略")
             (
                 X_train,
                 X_val,
@@ -422,10 +911,6 @@ def run_pipeline(config_path: Path) -> None:
             ) = _stratified_split(X, target, ids, test_size, val_size, random_state)
     else:
         logger.info("使用随机切分策略")
-        test_size = float(cfg.get("test_size", 0.15))
-        val_size = float(cfg.get("val_size", 0.15))
-        random_state = int(cfg.get("random_state", 42))
-
         (
             X_train,
             X_val,
@@ -524,23 +1009,63 @@ def run_cleaning_only(config_path: Path) -> None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             anomaly_stats_path = middata_dir / f"anomaly_statistics_{timestamp}.csv"
     
-    try:
-        anomaly_stats.to_csv(anomaly_stats_path, index=False, encoding='utf-8-sig')
-        logger.info("异常值统计表已保存: {} ({} 条记录)".format(anomaly_stats_path, len(anomaly_stats)))
-    except PermissionError as e:
-        logger.error("无法保存异常值统计表，文件可能被占用: {}".format(e))
-        logger.info("请关闭Excel或其他打开该文件的程序后再试")
-
     # 清洗三张表（根据规范严格清洗）
     logger.info("开始清洗数据表")
     cleaned_lc = clean_lc(data["lc"], cfg)
-    logger.info("LC 表清洗完成 (添加了新特征: 正常还款比)")
+    logger.info("LC 表清洗完成")
     
     cleaned_lp = clean_lp(data["lp"])
     logger.info("LP 表清洗完成 (还款状态已重新赋值)")
     
     cleaned_lcis = clean_lcis(data["lcis"])
     logger.info("LCIS 表清洗完成 (已处理异常值和无效状态)")
+
+    lc_total_after_cleaning = len(cleaned_lc)
+    lcis_total_after_cleaning = len(cleaned_lcis)
+    clip_records = []
+    for df in (cleaned_lc, cleaned_lcis):
+        records = getattr(df, "attrs", {}).get("clip_records", [])
+        if records:
+            clip_records.extend(records)
+
+    if clip_records:
+        extra_rows = []
+        for record in clip_records:
+            table = record.get("table", "")
+            column = record.get("column", "")
+            count = int(record.get("count", 0))
+            if count <= 0 or not column:
+                continue
+            if table == "LC":
+                total = lc_total_after_cleaning
+            elif table == "LCIS":
+                total = lcis_total_after_cleaning
+            else:
+                total = len(cleaned_lp)
+            threshold = record.get("threshold")
+            if threshold is not None and not pd.isna(threshold):
+                data_item = f"{column}_P99裁剪(阈值={threshold:.2f})"
+            else:
+                data_item = f"{column}_P99裁剪"
+            extra_rows.append(
+                {
+                    "表名": table or "未标注",
+                    "数据项": data_item,
+                    "异常值数量": count,
+                    "总记录数": total,
+                    "异常值占比": round(count / total * 100, 2) if total > 0 else 0.0,
+                }
+            )
+        if extra_rows:
+            anomaly_stats = pd.concat([anomaly_stats, pd.DataFrame(extra_rows)], ignore_index=True)
+            anomaly_stats = anomaly_stats.sort_values(["表名", "数据项"])
+
+    try:
+        anomaly_stats.to_csv(anomaly_stats_path, index=False, encoding='utf-8-sig')
+        logger.info("异常值统计表已保存: {} ({} 条记录)".format(anomaly_stats_path, len(anomaly_stats)))
+    except PermissionError as e:
+        logger.error("无法保存异常值统计表，文件可能被占用: {}".format(e))
+        logger.info("请关闭Excel或其他打开该文件的程序后再试")
 
     # 保存清洗后的三张CSV表
     logger.info("开始保存清洗后的CSV表")

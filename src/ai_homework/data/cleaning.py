@@ -15,6 +15,25 @@ SUCCESS_KEYWORDS = {"成功", "成功认证", "已认证", "是", "Y", "YES", "T
 # 认证失败的关键词（全部为字符串类型）
 FAILURE_KEYWORDS = {"否", "未成功认证", "未认证", "N", "NO", "FALSE", "0", "0.0", "", "未成功"}
 
+LC_CATEGORY_ALLOWED_VALUES = {
+    "初始评级": {"A", "B", "C", "D", "E", "F"},
+    "借款类型": {"应收安全标", "电商", "APP闪电", "普通", "其他"},
+    "是否首标": {"是", "否"},
+    "性别": {"男", "女"},
+}
+
+LP_CATEGORY_ALLOWED_VALUES = {
+    "还款状态": {"0", "1", "2", "3", "4"},
+}
+
+LCIS_CATEGORY_ALLOWED_VALUES = {
+    "初始评级": {"AAA", "AA", "A", "B", "C", "D", "E", "F"},
+    "借款类型": {"应收安全标", "电商", "APP闪电", "普通", "其他"},
+    "是否首标": {"是", "否"},
+    "性别": {"男", "女"},
+    "标当前状态": {"正常还款中", "逾期中", "已还清", "已债转"},
+}
+
 
 def _convert_auth_to_binary(series: pd.Series) -> pd.Series:
     """将认证字段转换为0/1：成功认证=1，未成功认证=0。
@@ -39,19 +58,32 @@ def _convert_auth_to_binary(series: pd.Series) -> pd.Series:
         except (ValueError, TypeError):
             pass
         
-        # 检查是否为成功认证（检查字符串是否包含成功关键词）
         val_str_upper = val_str.upper()
-        for keyword in SUCCESS_KEYWORDS:
-            if keyword.upper() in val_str_upper or keyword in val_str:
-                return 1.0
+        val_str_normalized = val_str_upper.replace(" ", "")
         
-        # 检查是否为失败认证
         for keyword in FAILURE_KEYWORDS:
-            if keyword.upper() in val_str_upper or keyword in val_str:
+            keyword_upper = keyword.upper()
+            keyword_normalized = keyword_upper.replace(" ", "")
+            if keyword_normalized == "":
+                if val_str_normalized == "":
+                    return 0.0
+                continue
+            if keyword_normalized in val_str_normalized or keyword_upper in val_str_upper:
                 return 0.0
         
-        # 默认：如果包含"成功"关键字，返回1，否则返回0
-        if "成功" in val_str:
+        for keyword in SUCCESS_KEYWORDS:
+            keyword_upper = keyword.upper()
+            keyword_normalized = keyword_upper.replace(" ", "")
+            if keyword_normalized == "":
+                continue
+            if keyword_normalized in val_str_normalized or keyword_upper in val_str_upper:
+                return 1.0
+        
+        if ("成功" in val_str and
+                "未" not in val_str and
+                "無" not in val_str and
+                "无" not in val_str and
+                "不" not in val_str):
             return 1.0
         
         return 0.0
@@ -67,13 +99,31 @@ def clean_lc(df: pd.DataFrame, cfg: Dict[str, Iterable[str]] | None = None) -> p
     2. 认证字段（手机认证、户口认证、视频认证、学历认证、征信认证、淘宝认证）：
        成功认证=1，未成功认证=0
     3. 类别字段（初始评级、借款类型、是否首标、性别）保持原值，后续进行one-hot编码
-    4. 添加新特征：正常还款比 = 历史正常还款期数 / (历史正常还款期数 + 历史逾期还款期数)
     
     参数说明：
     - df：原始 LC 数据
     - cfg：配置文件中关于特征列的约定（可选，用于兼容性）
     """
     cleaned = df.copy()
+    
+    if "年龄" in cleaned.columns:
+        numeric_age = pd.to_numeric(cleaned["年龄"], errors="coerce")
+        out_of_range_mask = numeric_age.notna() & ~numeric_age.between(18, 70)
+        affected_count = int(out_of_range_mask.sum())
+        cleaned["年龄"] = numeric_age
+        if affected_count > 0:
+            cleaned.loc[out_of_range_mask, "年龄"] = np.nan
+        total_rows = len(cleaned)
+        notes = cleaned.attrs.setdefault("cleaning_notes", {})
+        notes["年龄_out_of_range"] = {
+            "total_rows": total_rows,
+            "affected_count": affected_count,
+            "affected_rate": round(affected_count / total_rows * 100, 4) if total_rows > 0 else 0.0,
+            "min_allowed": 18,
+            "max_allowed": 70,
+            "action": "set_to_nan",
+        }
+        cleaned.attrs["cleaning_notes"] = notes
     
     # 1. 认证字段转换：成功认证=1，未成功认证=0
     auth_cols = ["手机认证", "户口认证", "视频认证", "学历认证", "征信认证", "淘宝认证"]
@@ -90,18 +140,31 @@ def clean_lc(df: pd.DataFrame, cfg: Dict[str, Iterable[str]] | None = None) -> p
     #       历史成功借款次数、历史成功借款金额、总待还本金、
     #       历史正常还款期数、历史逾期还款期数
     
-    # 4. 添加新特征：正常还款比
-    if "历史正常还款期数" in cleaned.columns and "历史逾期还款期数" in cleaned.columns:
-        normal_periods = pd.to_numeric(cleaned["历史正常还款期数"], errors='coerce').fillna(0)
-        overdue_periods = pd.to_numeric(cleaned["历史逾期还款期数"], errors='coerce').fillna(0)
-        total_periods = normal_periods + overdue_periods
-        
-        # 计算正常还款比，避免除零
-        cleaned["正常还款比"] = np.where(
-            total_periods > 0,
-            normal_periods / total_periods,
-            0.0  # 如果总期数为0，则正常还款比为0
-        )
+    clip_records = []
+    for col in ["借款金额", "总待还本金"]:
+        if col in cleaned.columns:
+            numeric_series = pd.to_numeric(cleaned[col], errors='coerce')
+            cleaned[col] = numeric_series
+            if numeric_series.notna().any():
+                threshold = numeric_series.quantile(0.99)
+                if pd.notna(threshold):
+                    exceed_mask = numeric_series > threshold
+                    count = int(exceed_mask.sum())
+                    if count > 0:
+                        cleaned.loc[exceed_mask, col] = threshold
+                        clip_records.append(
+                            {
+                                "table": "LC",
+                                "column": col,
+                                "threshold": float(threshold),
+                                "count": count,
+                                "method": "P99",
+                            }
+                        )
+
+    if clip_records:
+        existing = cleaned.attrs.get("clip_records", [])
+        cleaned.attrs["clip_records"] = existing + clip_records
     
     return cleaned
 
@@ -145,10 +208,10 @@ def clean_lcis(df: pd.DataFrame) -> pd.DataFrame:
     """根据规范清洗LCIS表。
     
     清洗规则：
-    1. 认证字段处理：手机认证、户口认证使用one-hot编码（保持原值），
-       视频认证、学历认证、征信认证、淘宝认证：成功认证=1，未成功认证=0
+    1. 认证字段处理：手机认证、户口认证、视频认证、学历认证、征信认证、淘宝认证
+       统一转换为成功认证=1，未成功认证=0（异常值视为未成功认证）
     2. 历史正常还款期数、历史逾期还款期数：以99%分位数值为极大值，超过的取极大值
-    3. 标当前状态：只保留'正常还款中'，'逾期中'，'已还清'，其他删除（设为缺失）
+    3. 标当前状态：只保留'正常还款中'，'逾期中'，'已还清'，其他直接剔除
     4. 上次还款日期：删除非日期项（设为缺失）
     5. 历史成功借款次数、历史成功借款金额、总待还本金：保留缺失值
     6. 其他字段保持不变
@@ -158,16 +221,16 @@ def clean_lcis(df: pd.DataFrame) -> pd.DataFrame:
     """
     cleaned = df.copy()
     
-    # 1. 认证字段处理
-    # 手机认证、户口认证：one-hot编码（保持原值，不做转换）
-    # 视频认证、学历认证、征信认证、淘宝认证：成功认证=1，未成功认证=0
-    auth_cols_binary = ["视频认证", "学历认证", "征信认证", "淘宝认证"]
+    # 1. 认证字段处理：全部转换为成功认证=1，未成功认证=0
+    # 将非认证状态（婚姻、学历等错位值）统一视为未成功认证
+    auth_cols_binary = ["手机认证", "户口认证", "视频认证", "学历认证", "征信认证", "淘宝认证"]
     for col in auth_cols_binary:
         if col in cleaned.columns:
             cleaned[col] = _convert_auth_to_binary(cleaned[col])
     
     # 2. 历史正常还款期数、历史逾期还款期数：以99%分位数值为极大值
     period_cols = ["历史正常还款期数", "历史逾期还款期数"]
+    clip_records = []
     for col in period_cols:
         if col in cleaned.columns:
             # 转换为数值类型
@@ -175,12 +238,45 @@ def clean_lcis(df: pd.DataFrame) -> pd.DataFrame:
             # 计算99%分位数
             p99 = cleaned[col].quantile(0.99)
             if pd.notna(p99):
-                # 超过99%分位数的值替换为99%分位数
-                cleaned.loc[cleaned[col] > p99, col] = p99
+                exceed_mask = cleaned[col] > p99
+                count = int(exceed_mask.sum())
+                if count > 0:
+                    # 超过99%分位数的值替换为99%分位数
+                    cleaned.loc[exceed_mask, col] = p99
+                    clip_records.append(
+                        {
+                            "table": "LCIS",
+                            "column": col,
+                            "threshold": float(p99),
+                            "count": count,
+                            "method": "P99",
+                        }
+                    )
     
+    invalid_status_summary = None
+
     # 3. 标当前状态：只保留'正常还款中'，'逾期中'，'已还清'，其他删除
     if "标当前状态" in cleaned.columns:
         valid_statuses = {"正常还款中", "逾期中", "已还清"}
+
+        original_status = cleaned["标当前状态"].copy()
+        normalized_status = original_status.apply(_normalize_category_value)
+        allowed_status = {str(val).strip() for val in valid_statuses if val is not None}
+        invalid_mask = normalized_status.isna() | ~normalized_status.isin(allowed_status)
+
+        if invalid_mask.any():
+            invalid_counts = (
+                original_status[invalid_mask]
+                .fillna("缺失")
+                .astype(str)
+                .value_counts()
+                .to_dict()
+            )
+            invalid_status_summary = {
+                "total_removed": int(invalid_mask.sum()),
+                "value_counts": {str(key): int(val) for key, val in invalid_counts.items()},
+            }
+
         def filter_status(val):
             if pd.isna(val):
                 return np.nan
@@ -200,6 +296,17 @@ def clean_lcis(df: pd.DataFrame) -> pd.DataFrame:
     # 5. 历史成功借款次数、历史成功借款金额、总待还本金：保留缺失值（不做填充）
     # 这些字段保持原值，不进行填充
     
+    # 6. 清除标当前状态为缺失的记录，避免后续流程再行剔除
+    if "标当前状态" in cleaned.columns:
+        cleaned = cleaned[cleaned["标当前状态"].notna()].copy()
+        if invalid_status_summary:
+            notes = cleaned.attrs.setdefault("cleaning_notes", {})
+            notes["标当前状态_invalid"] = invalid_status_summary
+    
+    if clip_records:
+        existing = cleaned.attrs.get("clip_records", [])
+        cleaned.attrs["clip_records"] = existing + clip_records
+
     return cleaned
 
 
@@ -261,6 +368,9 @@ def _detect_lc_anomalies(df: pd.DataFrame, cfg: Dict[str, Iterable[str]]) -> Dic
             negative_count = int((df[col] < 0).sum())
             if negative_count > 0:
                 anomalies[f"{col}_负数"] = negative_count
+
+    # 7. 分类字段非法取值
+    anomalies.update(_detect_category_anomalies(df, LC_CATEGORY_ALLOWED_VALUES))
     
     return anomalies
 
@@ -305,6 +415,9 @@ def _detect_lp_anomalies(df: pd.DataFrame) -> Dict[str, int]:
             empty_str_count = int((df[col] == "").sum())
             if empty_str_count > 0:
                 anomalies[f"{col}_空字符串"] = empty_str_count
+
+    # 5. 分类字段非法取值
+    anomalies.update(_detect_category_anomalies(df, LP_CATEGORY_ALLOWED_VALUES))
     
     return anomalies
 
@@ -350,6 +463,50 @@ def _detect_lcis_anomalies(df: pd.DataFrame) -> Dict[str, int]:
             if empty_str_count > 0:
                 anomalies[f"{col}_空字符串"] = empty_str_count
     
+    # 5. 分类字段非法取值统计
+    anomalies.update(_detect_category_anomalies(df, LCIS_CATEGORY_ALLOWED_VALUES))
+    
+    return anomalies
+
+
+def _normalize_category_value(value: object) -> str | None:
+    """标准化分类字段取值为可比较的字符串。"""
+    if pd.isna(value):
+        return None
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _detect_category_anomalies(
+    df: pd.DataFrame,
+    allowed_map: Dict[str, Iterable[object]],
+) -> Dict[str, int]:
+    """针对给定的字段-取值集合，检测非法分类取值。"""
+    anomalies: Dict[str, int] = {}
+
+    for col, allowed_values in allowed_map.items():
+        if col not in df.columns:
+            continue
+
+        series = df[col].dropna()
+        if series.empty:
+            continue
+
+        normalized_series = series.apply(_normalize_category_value)
+        allowed_normalized = {
+            value
+            for value in (
+                _normalize_category_value(v) for v in allowed_values
+            )
+            if value is not None and value != ""
+        }
+
+        invalid_mask = ~normalized_series.isin(allowed_normalized)
+        invalid_count = int(invalid_mask.sum())
+        if invalid_count > 0:
+            anomalies[f"{col}_非法取值"] = invalid_count
+
     return anomalies
 
 

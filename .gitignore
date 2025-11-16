@@ -17,6 +17,7 @@ src/ai_homework_p2p.egg-info/
 # Project outputs (generated artifacts)
 outputs/
 catboost_info/
+reports/
 
 # Data artifacts
 data/external/

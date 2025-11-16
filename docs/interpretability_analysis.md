@@ -5,24 +5,23 @@
 - 评估模型是否符合业务直觉，避免“黑箱”风险。
 
 ### 2. 方法
-- 基于最终 XGBoost 模型提取 Gain 型特征重要性，并补充 `feature_importances_` 作为兜底。
-- 输出结果：
-  - `reports/tables/feature_importance_xgboost.csv`
-  - `reports/figures/feature_importance_xgboost.png`
-- 若需要重新生成这些文件，可在 Agent 模式下说：“请执行 python -m ai_homework.pipelines.train_models --config configs/model_training.yaml”，Agent 会自动调用训练流程并刷新解释性产物。
+- 对三类树模型（LightGBM、XGBoost、CatBoost）输出 Gain/Permutation 特征重要性，并统一生成为 CSV 与柱状图。
+  - `outputs/reports/tables/feature_importance_{model}.csv`
+  - `outputs/reports/figures/feature_importance_{model}.png`
+- 基于同一批次训练结果，抽样 2,000 条样本计算 SHAP 值，生成全局 summary 图与明细表：
+  - `outputs/reports/figures/shap_summary_{model}.png`
+  - `outputs/reports/tables/shap_values_{model}.csv`
+- 再次训练可执行 `python3 -m ai_homework.cli.run_pipeline --skip-data`，流程会自动刷新上述解释性产物。
 
 ### 3. 主要发现
-- 特征 Top10 包括（截取部分）：
-  1. `历史逾期率`
-  2. `历史还款能力指数`
-  3. `借款杠杆比`
-  4. `历史逾期还款期数`
-  5. `按期还款率`
-- 这些特征聚焦于借款人历史表现与当前负债状况，与业务知识高度一致。
-- 时间特征（如 `借款成功日期_month`）在模型中仍有一定权重，说明季节性或批次效应可能存在。
+- **跨模型共识特征**：`history_repay_ratio`、`loan_term`、`loan_amount`/`loan_amount_per_term`、`history_avg_loan_amount` 与 `outstanding_to_history_amount_ratio` 在三套模型的重要性依旧领先，显示历史偿付能力与额度结构是区分违约风险的核心。
+- **LightGBM 侧重额度结构**：在移除 `loan_date_year_*` 之后，模型几乎完全依赖额度类派生指标（如 `loan_amount_to_history_amount_ratio`、`history_avg_term_payment`），高额借款且相对历史额度偏大的样本 SHAP 值仍明显为正。
+- **XGBoost 仍保留时间切片信息**：除了历史行为指标外，`loan_date_quarter_*` 与部分 `loan_date_month_*` 特征继续进入前列，说明季度/月份层面的批次效应对 XGBoost 决策仍有帮助。
+- **CatBoost 更聚焦额度与行为**：去掉年份后，`loan_term`、`history_repay_ratio`、`loan_term_rating_interaction`、`outstanding_to_history_amount_ratio` 等指标占据前十，时间 Dummy 的存在感明显下降，评分等级 (`rating_numeric`) 依旧体现风险分层。
+- 整体来看，正向 SHAP 值多由“借款额相对历史偏大 + 逾期比例高 + 部分时间段”驱动，反向 SHAP 值则对应“还款率高 + 等级优秀 + 借款额度适中”的人群。
 
 ### 4. 解读建议
-- 对高风险客群重点关注“历史逾期率”“借款杠杆比”，可作为人工复核的重点。
-- 结合认证信息（手机、征信等）与历史成功借款次数，进一步分层客户信用等级。
-- 后续可引入 SHAP 值，提供单笔样本级别解释，增强模型透明度。
+- 人工复核可优先关注“历史还款率快速下降”“当前借款额显著高于历史均值”且落在高风险时间窗口（如 15 年、16 年一季度）的样本。
+- 将评分等级、认证信息与额度比指标结合，构建多维评分卡或规则引擎，以形成更细粒度的风险分层。
+- 针对业务关切的单笔样本，可直接查询 `shap_values_{model}.csv` 或使用 summary 图定位关键驱动因素，在客服或风控沟通中提升透明度。
 
