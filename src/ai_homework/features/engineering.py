@@ -121,7 +121,16 @@ def build_feature_dataframe(
     df = add_time_features(cleaned_lc)
     df = add_derived_features(df)
 
-    df = df.merge(labels[[id_col, "label"]], on=id_col, how="left")
+    # 合并标签，包括is_valid列（如果存在）
+    label_cols = [id_col, "label"]
+    if "is_valid" in labels.columns:
+        label_cols.append("is_valid")
+    if "lcis_label" in labels.columns:
+        label_cols.append("lcis_label")
+    if "lp_label" in labels.columns:
+        label_cols.append("lp_label")
+    
+    df = df.merge(labels[label_cols], on=id_col, how="left")
 
     lp_features = compute_lp_features(lp, id_col)
     if not lp_features.empty:

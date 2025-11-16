@@ -15,7 +15,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
-from ..data.cleaning import clean_lc
+from ..data.cleaning import clean_lc, clean_lp, clean_lcis, generate_anomaly_statistics
 from ..data.labeling import generate_labels
 from ..data.loading import load_raw_data
 from ..features.engineering import build_feature_dataframe
@@ -193,14 +193,122 @@ def run_pipeline(config_path: Path) -> None:
     logger = get_logger()
     logger.info("开始数据准备流水线")
 
+    # 创建 middata 目录
+    middata_dir = outputs_root / "middata"
+    middata_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("中间数据目录已创建: {}".format(middata_dir))
+
     data = load_raw_data(raw_dir)
-    labels = generate_labels(data, id_col=id_col)
-    logger.info("标签生成完成：{} 条记录".format(labels.shape[0]))
+    
+    # 生成异常值统计表（基于原始数据）
+    logger.info("开始生成异常值统计表")
+    anomaly_stats = generate_anomaly_statistics(data["lc"], data["lp"], data["lcis"], cfg)
+    anomaly_stats_path = middata_dir / "anomaly_statistics.csv"
+    anomaly_stats.to_csv(anomaly_stats_path, index=False, encoding='utf-8-sig')
+    logger.info("异常值统计表已保存: {} ({} 条记录)".format(anomaly_stats_path, len(anomaly_stats)))
 
+    # 清洗三张表（根据规范严格清洗）
+    logger.info("开始清洗数据表")
     cleaned_lc = clean_lc(data["lc"], cfg)
-    logger.info("LC 表清洗完成")
+    logger.info("LC 表清洗完成 (添加了新特征: 正常还款比)")
+    
+    cleaned_lp = clean_lp(data["lp"])
+    logger.info("LP 表清洗完成 (还款状态已重新赋值)")
+    
+    cleaned_lcis = clean_lcis(data["lcis"])
+    logger.info("LCIS 表清洗完成 (已处理异常值和无效状态)")
 
-    feature_df = build_feature_dataframe(cleaned_lc, data["lp"], labels, cfg, id_col)
+    # 使用清洗后的数据生成标签
+    logger.info("开始生成标签（使用清洗后的数据）")
+    cleaned_data = {
+        "lc": cleaned_lc,
+        "lp": cleaned_lp,
+        "lcis": cleaned_lcis
+    }
+    labels = generate_labels(cleaned_data, id_col=id_col)
+    
+    # 统计标签分布
+    valid_labels = labels[labels["is_valid"] == True]
+    invalid_labels = labels[labels["is_valid"] == False]
+    logger.info("标签生成完成：总记录数={}，有效标签={}，无效标签={}".format(
+        len(labels), len(valid_labels), len(invalid_labels)
+    ))
+    if len(valid_labels) > 0:
+        label_counts = valid_labels["label"].value_counts()
+        logger.info("有效标签分布：")
+        for label_val, count in label_counts.items():
+            label_name = "已还清（正常）" if label_val == 0 else "逾期中（违约）"
+            logger.info("  - {} (标签={}): {} 条".format(label_name, label_val, count))
+
+    # 保存清洗后的三张CSV表
+    logger.info("开始保存清洗后的CSV表")
+    
+    # LC表：保存清洗后的数据
+    cleaned_lc_path = middata_dir / "LC_cleaned.csv"
+    lc_to_save = cleaned_lc.copy()
+    # 将日期字段转换为字符串格式以便在CSV中可读（处理NaN值）
+    if "借款成功日期" in lc_to_save.columns:
+        if pd.api.types.is_datetime64_any_dtype(lc_to_save["借款成功日期"]):
+            lc_to_save["借款成功日期"] = lc_to_save["借款成功日期"].apply(
+                lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else ''
+            )
+    lc_to_save.to_csv(cleaned_lc_path, index=False, encoding='utf-8-sig')
+    logger.info("清洗后的LC表已保存: {} ({} 条记录, {} 个字段)".format(
+        cleaned_lc_path, len(cleaned_lc), len(cleaned_lc.columns)
+    ))
+
+    # LP表：保存清洗后的数据
+    lp_cleaned_path = middata_dir / "LP_cleaned.csv"
+    lp_to_save = cleaned_lp.copy()
+    # 将日期字段转换为字符串格式（处理NaN值）
+    date_cols_lp = ["到期日期", "还款日期", "recorddate"]
+    for col in date_cols_lp:
+        if col in lp_to_save.columns and pd.api.types.is_datetime64_any_dtype(lp_to_save[col]):
+            lp_to_save[col] = lp_to_save[col].apply(
+                lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else ''
+            )
+    lp_to_save.to_csv(lp_cleaned_path, index=False, encoding='utf-8-sig')
+    logger.info("清洗后的LP表已保存: {} ({} 条记录, {} 个字段)".format(
+        lp_cleaned_path, len(cleaned_lp), len(cleaned_lp.columns)
+    ))
+
+    # LCIS表：保存清洗后的数据
+    lcis_cleaned_path = middata_dir / "LCIS_cleaned.csv"
+    lcis_to_save = cleaned_lcis.copy()
+    # 将日期字段转换为字符串格式（处理NaN值）
+    date_cols_lcis = ["借款成功日期", "上次还款日期", "下次计划还款日期", "recorddate"]
+    for col in date_cols_lcis:
+        if col in lcis_to_save.columns and pd.api.types.is_datetime64_any_dtype(lcis_to_save[col]):
+            lcis_to_save[col] = lcis_to_save[col].apply(
+                lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else ''
+            )
+    lcis_to_save.to_csv(lcis_cleaned_path, index=False, encoding='utf-8-sig')
+    logger.info("清洗后的LCIS表已保存: {} ({} 条记录, {} 个字段)".format(
+        lcis_cleaned_path, len(cleaned_lcis), len(cleaned_lcis.columns)
+    ))
+
+    feature_df = build_feature_dataframe(cleaned_lc, cleaned_lp, labels, cfg, id_col)
+    
+    # 只保留有效标签的记录（排除"正常还款中"等未产生结果的记录）
+    if "is_valid" in feature_df.columns:
+        feature_df_valid = feature_df[feature_df["is_valid"] == True].copy()
+        logger.info("过滤无效标签后：{} 条有效记录（原始记录：{} 条）".format(
+            len(feature_df_valid), len(feature_df)
+        ))
+        feature_df = feature_df_valid
+    
+    # 确保标签列存在且有效
+    if "label" not in feature_df.columns:
+        raise ValueError("特征表中缺少标签列")
+    
+    # 检查是否有有效标签
+    valid_label_mask = feature_df["label"].notna()
+    if valid_label_mask.sum() == 0:
+        raise ValueError("没有有效的标签记录，无法进行模型训练")
+    
+    feature_df = feature_df[valid_label_mask].copy()
+    logger.info("最终用于建模的记录数：{} 条".format(len(feature_df)))
+    
     analysis_cfg = cfg.get("feature_analysis", {})
     if analysis_cfg:
         _export_feature_analysis(feature_df, cfg.get("numeric_features", []), cfg.get("label_column", "label"), analysis_cfg)
@@ -217,15 +325,44 @@ def run_pipeline(config_path: Path) -> None:
 
     _ensure_columns(feature_df, binary_cols + numeric_cols)
 
+    # 检查binary_cols中是否有object类型的列，如果有，移到categorical_cols中进行one-hot编码
+    binary_cols_to_convert = []
+    binary_cols_numeric = []
+    for col in binary_cols:
+        if col in feature_df.columns:
+            if feature_df[col].dtype == 'object':
+                # object类型的binary列应该进行one-hot编码
+                binary_cols_to_convert.append(col)
+                if col not in categorical_cols:
+                    categorical_cols.append(col)
+                    logger.info("将object类型的binary特征 '{}' 移到categorical特征中进行one-hot编码".format(col))
+            else:
+                # 数值类型的binary列保持不变
+                binary_cols_numeric.append(col)
+        else:
+            binary_cols_numeric.append(col)
+    
+    # 更新binary_cols，只保留数值类型的列
+    binary_cols = binary_cols_numeric
+
+    # 对categorical_cols进行one-hot编码
     dummy_df = pd.get_dummies(
         feature_df[categorical_cols],
         columns=categorical_cols,
         prefix=categorical_cols,
         dtype=float,
     )
+    
+    # 确保所有binary_cols都是数值类型
+    binary_features_df = feature_df[binary_cols].copy() if binary_cols else pd.DataFrame(index=feature_df.index)
+    for col in binary_cols:
+        if col in binary_features_df.columns:
+            # 确保是float类型
+            binary_features_df[col] = pd.to_numeric(binary_features_df[col], errors='coerce').fillna(0.0).astype(float)
+    
     # 将原始 ID + 数值/二值特征 + One-Hot 结果拼接在一起
     features = pd.concat(
-        [feature_df[[id_col]], feature_df[binary_cols + numeric_cols], dummy_df],
+        [feature_df[[id_col]], feature_df[numeric_cols], binary_features_df, dummy_df],
         axis=1,
     )
     features = features.loc[:, ~features.columns.duplicated()]
@@ -233,6 +370,14 @@ def run_pipeline(config_path: Path) -> None:
 
     X = features.drop(columns=[id_col])
     ids = feature_df[id_col]
+    
+    # 最终检查：确保所有特征都是数值类型
+    object_cols = [col for col in X.columns if X[col].dtype == 'object']
+    if object_cols:
+        logger.warning("发现object类型的特征列，将尝试转换为数值类型: {}".format(object_cols))
+        for col in object_cols:
+            # 尝试转换为数值，如果失败则设为0
+            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0.0).astype(float)
 
     split_strategy = str(cfg.get("split_strategy", "random")).lower()
     if split_strategy == "time":
@@ -329,6 +474,138 @@ def run_pipeline(config_path: Path) -> None:
     logger.info("数据准备流水线完成")
 
 
+def run_cleaning_only(config_path: Path) -> None:
+    """仅执行数据清洗，输出中间表，不进行后续的特征工程和模型训练。
+    
+    该函数会：
+    1. 加载原始数据
+    2. 生成异常值统计表
+    3. 清洗LC表
+    4. 保存清洗后的三张CSV表到 outputs/middata/
+    """
+    cfg = load_yaml(config_path)
+    raw_dir = _resolve_path(cfg.get("raw_data_dir"))
+    outputs_root = PROJECT_ROOT / "outputs"
+    log_dir = _resolve_path(cfg.get("logs_dir")) or (outputs_root / "logs")
+
+    if raw_dir is None:
+        raise ValueError("配置文件缺少必要的目录字段：raw_data_dir")
+
+    id_col = cfg.get("id_column", "ListingId")
+
+    setup_logger(log_dir, name="data_preparation")
+    logger = get_logger()
+    logger.info("开始数据清洗流程（仅清洗，不进行特征工程）")
+
+    # 创建 middata 目录
+    middata_dir = outputs_root / "middata"
+    middata_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("中间数据目录已创建: {}".format(middata_dir))
+
+    # 加载原始数据
+    data = load_raw_data(raw_dir)
+    logger.info("原始数据加载完成: LC={}条, LP={}条, LCIS={}条".format(
+        len(data["lc"]), len(data["lp"]), len(data["lcis"])
+    ))
+
+    # 生成异常值统计表（基于原始数据）
+    logger.info("开始生成异常值统计表")
+    anomaly_stats = generate_anomaly_statistics(data["lc"], data["lp"], data["lcis"], cfg)
+    anomaly_stats_path = middata_dir / "anomaly_statistics.csv"
+    
+    # 如果文件存在且被占用，先尝试删除或使用临时文件名
+    if anomaly_stats_path.exists():
+        try:
+            anomaly_stats_path.unlink()
+            logger.info("已删除旧的异常值统计表文件")
+        except PermissionError:
+            logger.warning("异常值统计表文件被占用，尝试使用带时间戳的文件名")
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            anomaly_stats_path = middata_dir / f"anomaly_statistics_{timestamp}.csv"
+    
+    try:
+        anomaly_stats.to_csv(anomaly_stats_path, index=False, encoding='utf-8-sig')
+        logger.info("异常值统计表已保存: {} ({} 条记录)".format(anomaly_stats_path, len(anomaly_stats)))
+    except PermissionError as e:
+        logger.error("无法保存异常值统计表，文件可能被占用: {}".format(e))
+        logger.info("请关闭Excel或其他打开该文件的程序后再试")
+
+    # 清洗三张表（根据规范严格清洗）
+    logger.info("开始清洗数据表")
+    cleaned_lc = clean_lc(data["lc"], cfg)
+    logger.info("LC 表清洗完成 (添加了新特征: 正常还款比)")
+    
+    cleaned_lp = clean_lp(data["lp"])
+    logger.info("LP 表清洗完成 (还款状态已重新赋值)")
+    
+    cleaned_lcis = clean_lcis(data["lcis"])
+    logger.info("LCIS 表清洗完成 (已处理异常值和无效状态)")
+
+    # 保存清洗后的三张CSV表
+    logger.info("开始保存清洗后的CSV表")
+    
+    # LC表：保存清洗后的数据
+    cleaned_lc_path = middata_dir / "LC_cleaned.csv"
+    lc_to_save = cleaned_lc.copy()
+    # 将日期字段转换为字符串格式以便在CSV中可读（处理NaN值）
+    if "借款成功日期" in lc_to_save.columns:
+        if pd.api.types.is_datetime64_any_dtype(lc_to_save["借款成功日期"]):
+            lc_to_save["借款成功日期"] = lc_to_save["借款成功日期"].apply(
+                lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else ''
+            )
+    try:
+        lc_to_save.to_csv(cleaned_lc_path, index=False, encoding='utf-8-sig')
+        logger.info("清洗后的LC表已保存: {} ({} 条记录, {} 个字段)".format(
+            cleaned_lc_path, len(cleaned_lc), len(cleaned_lc.columns)
+        ))
+    except PermissionError as e:
+        logger.error("无法保存LC表，文件可能被占用: {}".format(e))
+
+    # LP表：保存清洗后的数据
+    lp_cleaned_path = middata_dir / "LP_cleaned.csv"
+    lp_to_save = cleaned_lp.copy()
+    # 将日期字段转换为字符串格式（处理NaN值）
+    date_cols_lp = ["到期日期", "还款日期", "recorddate"]
+    for col in date_cols_lp:
+        if col in lp_to_save.columns and pd.api.types.is_datetime64_any_dtype(lp_to_save[col]):
+            lp_to_save[col] = lp_to_save[col].apply(
+                lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else ''
+            )
+    try:
+        lp_to_save.to_csv(lp_cleaned_path, index=False, encoding='utf-8-sig')
+        logger.info("清洗后的LP表已保存: {} ({} 条记录, {} 个字段)".format(
+            lp_cleaned_path, len(cleaned_lp), len(cleaned_lp.columns)
+        ))
+    except PermissionError as e:
+        logger.error("无法保存LP表，文件可能被占用: {}".format(e))
+
+    # LCIS表：保存清洗后的数据
+    lcis_cleaned_path = middata_dir / "LCIS_cleaned.csv"
+    lcis_to_save = cleaned_lcis.copy()
+    # 将日期字段转换为字符串格式（处理NaN值）
+    date_cols_lcis = ["借款成功日期", "上次还款日期", "下次计划还款日期", "recorddate"]
+    for col in date_cols_lcis:
+        if col in lcis_to_save.columns and pd.api.types.is_datetime64_any_dtype(lcis_to_save[col]):
+            lcis_to_save[col] = lcis_to_save[col].apply(
+                lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else ''
+            )
+    try:
+        lcis_to_save.to_csv(lcis_cleaned_path, index=False, encoding='utf-8-sig')
+        logger.info("清洗后的LCIS表已保存: {} ({} 条记录, {} 个字段)".format(
+            lcis_cleaned_path, len(cleaned_lcis), len(cleaned_lcis.columns)
+        ))
+    except PermissionError as e:
+        logger.error("无法保存LCIS表，文件可能被占用: {}".format(e))
+
+    logger.info("数据清洗流程完成！中间表已保存至: {}".format(middata_dir))
+    logger.info("生成的文件：")
+    logger.info("  - 异常值统计表: {}".format(anomaly_stats_path))
+    logger.info("  - 清洗后的LC表: {}".format(cleaned_lc_path))
+    logger.info("  - 清洗后的LP表: {}".format(lp_cleaned_path))
+    logger.info("  - 清洗后的LCIS表: {}".format(lcis_cleaned_path))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare PPDAI dataset")
     parser.add_argument(
@@ -337,10 +614,18 @@ def parse_args() -> argparse.Namespace:
         default=str(PROJECT_ROOT / "configs" / "data_processing.yaml"),
         help="配置文件路径",
     )
+    parser.add_argument(
+        "--cleaning-only",
+        action="store_true",
+        help="仅执行数据清洗，输出中间表，不进行后续的特征工程和模型训练",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run_pipeline(Path(args.config))
+    if args.cleaning_only:
+        run_cleaning_only(Path(args.config))
+    else:
+        run_pipeline(Path(args.config))
 

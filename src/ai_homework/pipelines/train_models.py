@@ -223,27 +223,34 @@ def _export_shap_values(
         sample = X_reference.copy()
 
     logger.info("生成模型 %s 的 SHAP 分析样本量=%s", model_name, len(sample))
-    explainer = shap.TreeExplainer(estimator)
-    shap_values = explainer.shap_values(sample)
-    if isinstance(shap_values, list):
-        shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
+    try:
+        explainer = shap.TreeExplainer(estimator)
+        shap_values = explainer.shap_values(sample)
+        if isinstance(shap_values, list):
+            shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
 
-    shap.summary_plot(
-        shap_values,
-        sample,
-        show=False,
-        plot_type="bar",
-        max_display=min(25, sample.shape[1]),
-    )
-    fig_path = figures_dir / f"shap_summary_{model_name}.png"
-    plt.tight_layout()
-    plt.savefig(fig_path, dpi=300)
-    plt.close()
+        shap.summary_plot(
+            shap_values,
+            sample,
+            show=False,
+            plot_type="bar",
+            max_display=min(25, sample.shape[1]),
+        )
+        fig_path = figures_dir / f"shap_summary_{model_name}.png"
+        plt.tight_layout()
+        plt.savefig(fig_path, dpi=300)
+        plt.close()
 
-    shap_table = pd.DataFrame(shap_values, columns=sample.columns)
-    shap_table.insert(0, "model", model_name)
-    shap_table.to_csv(tables_dir / f"shap_values_{model_name}.csv", index=False)
-    logger.info("SHAP 结果已输出：%s, %s", fig_path, tables_dir / f"shap_values_{model_name}.csv")
+        shap_table = pd.DataFrame(shap_values, columns=sample.columns)
+        shap_table.insert(0, "model", model_name)
+        shap_table.to_csv(tables_dir / f"shap_values_{model_name}.csv", index=False)
+        logger.info("SHAP 结果已输出：%s, %s", fig_path, tables_dir / f"shap_values_{model_name}.csv")
+    except (ValueError, AttributeError, TypeError) as e:
+        logger.warning("模型 %s 的 SHAP 分析失败（可能是版本兼容性问题）：%s", model_name, str(e))
+        logger.warning("跳过 SHAP 分析，继续处理其他模型")
+    except Exception as e:
+        logger.warning("模型 %s 的 SHAP 分析失败：%s", model_name, str(e))
+        logger.warning("跳过 SHAP 分析，继续处理其他模型")
 
 
 def run_pipeline(config_path: Path) -> None:
