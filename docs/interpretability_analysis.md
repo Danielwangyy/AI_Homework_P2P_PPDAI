@@ -13,6 +13,8 @@
   - `outputs/reports/tables/shap_values_{model}.csv`
 - 再次训练可执行 `python3 -m ai_homework.cli.run_pipeline --skip-data`，流程会自动刷新上述解释性产物。
 
+> ⚠️ 基线说明：当前解读基于 2025-11-16 09:50-09:55 全特征流水线的基线模型输出；除非重新跑基线，请勿覆盖或修改该批次的解释性结论，仅在此基础上追加新的消融对比。
+
 ### 3. 主要发现
 - **跨模型共识特征**：`history_repay_ratio`、`loan_term`、`loan_amount`/`loan_amount_per_term`、`history_avg_loan_amount` 与 `outstanding_to_history_amount_ratio` 在三套模型的重要性依旧领先，显示历史偿付能力与额度结构是区分违约风险的核心。
 - **LightGBM 侧重额度结构**：在移除 `loan_date_year_*` 之后，模型几乎完全依赖额度类派生指标（如 `loan_amount_to_history_amount_ratio`、`history_avg_term_payment`），高额借款且相对历史额度偏大的样本 SHAP 值仍明显为正。

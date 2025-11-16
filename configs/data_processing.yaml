@@ -68,13 +68,7 @@ feature_selection:
     top_k: 80
     n_estimators: 200
     random_state: 42
-feature_drops:
-  before_encoding:
-    exact:
-      - "loan_date_year"
-  after_encoding:
-    prefixes:
-      - "loan_date_year_"
+feature_drops: {}
 test_size: 0.15
 val_size: 0.15
 random_state: 42
