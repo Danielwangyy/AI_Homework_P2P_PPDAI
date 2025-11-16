@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
@@ -413,6 +414,12 @@ def run_pipeline(config_path: Path) -> None:
     setup_logger(logs_dir, name="model_training")
     logger = get_logger()
 
+    run_label_raw = cfg.get("experiment_label") or cfg.get("run_label") or cfg.get("experiment_name") or config_path.stem
+    run_label = re.sub(r"[^0-9A-Za-z_-]+", "_", str(run_label_raw).strip()) or "run"
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_identifier = f"{run_label}_{run_timestamp}"
+    logger.info("本次训练运行标识：%s", run_identifier)
+
     _configure_matplotlib_font(logger)
 
     logger.info("开始模型训练流程")
@@ -555,10 +562,11 @@ def run_pipeline(config_path: Path) -> None:
             )
 
         if has_test:
+            cm_filename = f"confusion_matrix_{model_name}_{run_identifier}.png"
             plot_confusion_matrix(
                 y_test,
                 test_preds,
-                figures_dir / f"confusion_matrix_{model_name}.png",
+                figures_dir / cm_filename,
                 title=f"{model_name} - Confusion Matrix",
             )
 
@@ -593,6 +601,8 @@ def run_pipeline(config_path: Path) -> None:
                 "test": test_metrics,
             },
             "timestamp": timestamp,
+            "run_identifier": run_identifier,
+            "run_label": run_label,
             "config": model_cfg,
         }
         with (artifacts_dir / f"summary_{model_name}.json").open("w", encoding="utf-8") as f:
